@@ -7,8 +7,9 @@ from PIL import Image, ImageOps, ImageTk, ImageDraw, ImageFont, ExifTags
 from matplotlib import font_manager
 from datetime import datetime
 
-APP_VERSION = "v0.25.9.20.2"
+APP_VERSION = "v0.25.9.21.1"
 CONFIG_FILE = "settings.json"
+GITHUB_URL = "https://github.com/1st-world/photoEdit"
 
 def get_exif_date(path: str) -> str:
     '''
@@ -68,11 +69,9 @@ class WatermarkApp:
         self.root.title(f"사진 워터마크 삽입기 ({APP_VERSION})")
         self.settings_file = CONFIG_FILE
 
-        # 상태 변수
+        # 변수 초기화
         self.files = []
         self.selected_index = None
-
-        # 워터마크 설정 변수
         self.font_map = self._get_font_map()
         self.font_name = tk.StringVar(value=list(self.font_map.keys())[0])
         self.font_size = tk.DoubleVar(value=48)
@@ -88,26 +87,29 @@ class WatermarkApp:
         self.load_settings()
 
         # 좌측 프레임
-        frame_left = ttk.Frame(self.root)
+        frame_left = ttk.Frame(self.root, padding=5)
         frame_left.pack(side='left', fill='y', padx=5, pady=5)
 
         # 파일 추가/삭제 버튼
         frame_left_btns = ttk.Frame(frame_left)
         frame_left_btns.pack(pady=5)
-        ttk.Button(frame_left_btns, text="사진 추가", command=self.add_files).pack(side='left', ipadx=5, ipady=5, padx=5, pady=5)
-        ttk.Button(frame_left_btns, text="선택 삭제", command=self.remove_file).pack(side='right', ipadx=5, ipady=5, padx=5, pady=5)
+        ttk.Button(frame_left_btns, text="➕ 사진 추가", command=self.add_files).pack(side='left', ipadx=5, ipady=5, padx=5, pady=5)
+        ttk.Button(frame_left_btns, text="➖ 선택 삭제", command=self.remove_file).pack(side='right', ipadx=5, ipady=5, padx=5, pady=5)
 
         # 파일 목록 (Treeview)
-        self.tree = ttk.Treeview(frame_left, columns=("filename", "date"), show='headings', height=20)
+        scrollbar = ttk.Scrollbar(frame_left)
+        scrollbar.pack(side='right', fill='y')
+        self.tree = ttk.Treeview(frame_left, columns=("filename", "date"), show='headings', height=25, yscrollcommand=scrollbar.set)
         self.tree.heading("filename", text="파일명")
         self.tree.heading("date", text="촬영일")
         self.tree.column("filename", anchor='w')
         self.tree.column("date", anchor='center')
         self.tree.pack(fill='both', expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.on_file_select)
+        scrollbar.config(command=self.tree.yview)
 
         # 우측 프레임
-        frame_right = ttk.Frame(self.root)
+        frame_right = ttk.Frame(self.root, padding=5)
         frame_right.pack(side='right', fill='both', expand=True, padx=5, pady=5)
 
         # 사진 미리보기
@@ -120,8 +122,11 @@ class WatermarkApp:
         self.date_entry.pack()
         self.date_entry.bind("<KeyRelease>", self.commit_date)
 
+        # 사진 회전
+        ttk.Button(frame_right, text="↺ 사진 회전", command=self.rotate_image).pack()
+
         # 워터마크 옵션 패널
-        frame_options = ttk.LabelFrame(frame_right, text="워터마크 옵션")
+        frame_options = ttk.LabelFrame(frame_right, text="워터마크 옵션 (일괄 적용)")
         frame_options.pack(fill='x', padx=5, pady=5)
         for col in range(6):
             frame_options.columnconfigure(col, weight=1)
@@ -152,7 +157,7 @@ class WatermarkApp:
 
         ttk.Label(frame_options, text="날짜 형식").grid(row=1, column=6)
         ttk.Combobox(frame_options, textvariable=self.date_format,
-                     values=["YYYY년 MM월 DD일", "YYYY년 M월 D일", "YYYY-MM-DD", "YYYY. MM. DD.", "YYYY. M. D.", "YY. M. D.", "M/D/YYYY"]).grid(row=1, column=7)
+                     values=["YYYY년 MM월 DD일", "YYYY년 M월 D일", "YYYY-MM-DD", "YYYY. MM. DD.", "YYYY. M. D.", "'YY. M. D.", "M/D/YYYY"]).grid(row=1, column=7)
 
         # 워터마크 옵션 변경 시 미리보기 갱신
         vars_to_trace = (
@@ -175,7 +180,7 @@ class WatermarkApp:
         ttk.Label(frame_save, text="저장 방식").grid(row=0, column=0, rowspan=2)
         ttk.Radiobutton(frame_save, text="덮어쓰기", variable=self.save_mode, value="overwrite").grid(row=0, column=1)
         ttk.Radiobutton(frame_save, text="별도 폴더", variable=self.save_mode, value="separate").grid(row=1, column=1)
-        ttk.Button(frame_save, text="워터마크 적용", command=self.apply_watermarks).grid(row=0, column=2, rowspan=2, sticky='nsew')
+        ttk.Button(frame_save, text="✨ 워터마크 적용", command=self.apply_watermarks).grid(row=0, column=2, rowspan=2, sticky='nsew')
 
 
 
@@ -183,7 +188,7 @@ class WatermarkApp:
         file_paths = filedialog.askopenfilenames(filetypes=[("이미지 파일", "*.jpg;*.jpeg;*.png")])
         for path in file_paths:
             date_str = get_exif_date(path)
-            self.files.append({"path": path, "date_str": date_str})
+            self.files.append({"path": path, "date_str": date_str, "rotation": 0})
             self.tree.insert('', 'end', values=(os.path.basename(path), date_str if date_str else "❌"))
 
     def remove_file(self):
@@ -218,6 +223,11 @@ class WatermarkApp:
     def commit_date(self, *args):
         if self.selected_index is not None:
             self.files[self.selected_index]["date_str"] = self.date_entry.get().strip()
+            self.render_preview()
+
+    def rotate_image(self):
+        if self.selected_index is not None:
+            self.files[self.selected_index]["rotation"] = (self.files[self.selected_index]["rotation"] + 90) % 360
             self.render_preview()
 
     def choose_font_color(self):
@@ -280,8 +290,8 @@ class WatermarkApp:
             font_px = float(self.font_size.get())
             margin_px = float(self.margin.get())
         elif self.size_mode.get() == "백분율(%)":
-            font_px = float(img.height * (self.font_size.get() / 100.0))
-            margin_px = float(img.height * (self.margin.get() / 100.0))
+            font_px = float(max(img.width, img.height) * (self.font_size.get() / 100.0))
+            margin_px = float(max(img.width, img.height) * (self.margin.get() / 100.0))
 
         # 텍스트 스타일 로드
         try:
@@ -318,6 +328,9 @@ class WatermarkApp:
             img = Image.open(file_info["path"])
             img = ImageOps.exif_transpose(img)
 
+            if file_info.get("rotation", 0) != 0:
+                img = img.rotate(file_info["rotation"], expand=True)
+
             watermarked_img = self._draw_watermark(img, file_info["date_str"])
             preview_img = watermarked_img.convert("RGB")
             preview_img.thumbnail((500, 500))
@@ -345,7 +358,10 @@ class WatermarkApp:
 
                 img = Image.open(file_info["path"])
                 img = ImageOps.exif_transpose(img)
-                exif_bytes = img.info.get("exif")   # EXIF 데이터 보존
+                exif_bytes = img.info.get("exif")   # Orientation 값을 제외한 EXIF 데이터 보존
+
+                if file_info.get("rotation", 0) != 0:
+                    img = img.rotate(file_info["rotation"], expand=True)
 
                 watermarked_img = self._draw_watermark(img, date_str)
                 out_img = watermarked_img.convert("RGB")
