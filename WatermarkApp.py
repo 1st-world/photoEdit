@@ -7,7 +7,7 @@ from PIL import Image, ImageOps, ImageTk, ImageDraw, ImageFont, ExifTags
 from matplotlib import font_manager
 from datetime import datetime
 
-APP_VERSION = "v0.25.9.21.1"
+APP_VERSION = "v0.25.9.23.1"
 CONFIG_FILE = "settings.json"
 GITHUB_URL = "https://github.com/1st-world/photoEdit"
 
@@ -72,7 +72,7 @@ class WatermarkApp:
         # 변수 초기화
         self.files = []
         self.selected_index = None
-        self.font_map = self._get_font_map()
+        self.font_map = self.get_font_map()
         self.font_name = tk.StringVar(value=list(self.font_map.keys())[0])
         self.font_size = tk.DoubleVar(value=48)
         self.font_color = tk.StringVar(value="#000000")
@@ -128,7 +128,7 @@ class WatermarkApp:
         # 워터마크 옵션 패널
         frame_options = ttk.LabelFrame(frame_right, text="워터마크 옵션 (일괄 적용)")
         frame_options.pack(fill='x', padx=5, pady=5)
-        for col in range(6):
+        for col in range(8):
             frame_options.columnconfigure(col, weight=1)
 
         ttk.Label(frame_options, text="글꼴").grid(row=0, column=0)
@@ -242,19 +242,31 @@ class WatermarkApp:
         else:
             self.bg_color.set("none")
 
-    def get_position(self, size, text_w, text_h, margin):
+    def get_position(self, size, margin, position):
+        """
+        이미지 크기와 여백을 기반으로 텍스트 위치와 앵커를 반환합니다.
+        Args:
+            `size` (tuple): 이미지 크기 (width, height)
+            `margin` (float): 여백 크기 (px)
+            `position` (str): 위치 문자열 (좌측 상단/우측 상단/좌측 하단/우측 하단/중앙)
+        Returns:
+            (x, y), anchor (tuple): 위치 좌표와 앵커 문자열
+        """
         W, H = size
         pos_map = {
-            "좌측 상단": (margin, margin),
-            "우측 상단": (W - text_w - margin, margin),
-            "좌측 하단": (margin, H - text_h - margin),
-            "우측 하단": (W - text_w - margin, H - text_h - margin),
-            "중앙": ((W - text_w) // 2, (H - text_h) // 2),
+            "좌측 상단": ((margin, margin), "lt"),          # left-top (anchor 값)
+            "우측 상단": ((W - margin, margin), "rt"),      # right-top
+            "좌측 하단": ((margin, H - margin), "lb"),      # left-bottom
+            "우측 하단": ((W - margin, H - margin), "rb"),  # right-bottom
+            "중앙": ((W // 2, H // 2), "mm"),
         }
-        return pos_map.get(self.position.get(), (margin, margin))
+        result = pos_map.get(position)
+        if result is None:
+            print(f"Unknown position: '{position}'. Falling back to default position.")
+            result = ((W - margin, H - margin), "rb")
+        return result
 
-
-    def _get_font_map(self):
+    def get_font_map(self):
         fonts = font_manager.findSystemFonts(fontpaths=None, fontext='ttf')
         font_map = {}
         for font_path in fonts:
@@ -302,20 +314,17 @@ class WatermarkApp:
             print(f"Font loading failed: {e}. Falling back to default font.")
             font = ImageFont.load_default(font_px)
 
-        # 텍스트 크기 계산
-        bbox = draw.textbbox((0, 0), date_text, font=font)
-        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-
         # 위치 계산
-        pos = self.get_position(img.size, text_w, text_h, margin_px)
+        pos, anchor = self.get_position(img.size, margin_px, self.position.get())
+        bbox = draw.textbbox(pos, date_text, font=font, anchor=anchor)
         
         # 배경 적용
         bg_color = self.bg_color.get()
         if bg_color and bg_color.lower() != "none":
-            draw.rectangle([pos, (pos[0] + text_w, pos[1] + text_h)], fill=bg_color)
+            draw.rectangle(bbox, fill=bg_color)
         
         # 텍스트 적용
-        draw.text(pos, date_text, font=font, fill=self.font_color.get())
+        draw.text(pos, date_text, font=font, fill=self.font_color.get(), anchor=anchor)
 
         # 원본 이미지, 텍스트 레이어 합성
         return Image.alpha_composite(img.convert("RGBA"), txt_layer)
@@ -342,6 +351,14 @@ class WatermarkApp:
             self.preview_label.config(text="⚠️ 미리보기 불가")
     
     def apply_watermarks(self):
+        if not self.files:
+            messagebox.showwarning("경고", "처리할 파일이 없습니다.")
+            return
+        
+        if self.save_mode.get() == "overwrite":
+            if not messagebox.askyesno("확인", "원본 파일을 덮어쓰면 복구할 수 없습니다.\n정말 덮어쓰기 저장 방식으로 진행할까요?"):
+                return
+        
         save_mode = self.save_mode.get()
         output_dir = "watermarked"
         if save_mode == "separate":
