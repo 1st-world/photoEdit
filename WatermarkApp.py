@@ -7,16 +7,24 @@ from PIL import Image, ImageOps, ImageTk, ImageDraw, ImageFont, ExifTags
 from matplotlib import font_manager
 from datetime import datetime
 
-APP_VERSION = "v0.25.9.23.1"
+APP_VERSION = "v0.25.9.5"
 CONFIG_FILE = "settings.json"
 GITHUB_URL = "https://github.com/1st-world/photoEdit"
 
+
+def hex_to_rgba(hex_color: str, alpha_percent: float):
+    """Hex 색상 코드를 RGBA 튜플로 변환합니다."""
+    hex_color = hex_color.lstrip('#')
+    r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+    alpha = int(255 * (alpha_percent / 100.0))
+    return (r, g, b, alpha)
+
 def get_exif_date(path: str) -> str:
-    '''
+    """
     사진 파일의 EXIF 데이터를 통해 촬영일(DateTime) 값을 추출합니다.\n
     "YYYY-MM-DD" 형식으로 반환하며, 해당 데이터가 없거나 예외가 발생하면 빈 문자열을 반환합니다.\n
     가장 일반적인 "YYYY:MM:DD HH:MM:SS" 형식 외에는 현재 지원하지 않습니다.
-    '''
+    """
     try:
         with Image.open(path) as img:
             exif = img.getexif()
@@ -66,98 +74,120 @@ def format_date(date_str: str, fmt: str) -> str:
 class WatermarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"사진 워터마크 삽입기 ({APP_VERSION})")
+        self.root.title(f"촬영일 워터마크 삽입기 ({APP_VERSION})")
         self.settings_file = CONFIG_FILE
 
         # 변수 초기화
         self.files = []
         self.selected_index = None
         self.font_map = self.get_font_map()
+
+        # Tk 변수 초기화
         self.font_name = tk.StringVar(value=list(self.font_map.keys())[0])
         self.font_size = tk.DoubleVar(value=48)
         self.font_color = tk.StringVar(value="#000000")
-        self.bg_color = tk.StringVar(value="")
+        self.bg_color = tk.StringVar(value="#FFFFFF")
+        self.bg_opacity = tk.DoubleVar(value=100)
+        self.bg_padding = tk.DoubleVar(value=5)
         self.position = tk.StringVar(value="우측 하단")
         self.margin = tk.DoubleVar(value=20)
         self.size_mode = tk.StringVar(value="픽셀(px)")
         self.date_format = tk.StringVar(value="YYYY-MM-DD")
         self.save_mode = tk.StringVar(value="separate")
 
-        # 설정 불러오기
         self.load_settings()
+        self.create_widgets()
 
+
+    def create_widgets(self):
         # 좌측 프레임
-        frame_left = ttk.Frame(self.root, padding=5)
-        frame_left.pack(side='left', fill='y', padx=5, pady=5)
+        frame_left = ttk.Frame(self.root)
+        frame_left.pack(side='left', fill='y', padx=15, pady=15)
 
-        # 파일 추가/삭제 버튼
-        frame_left_btns = ttk.Frame(frame_left)
-        frame_left_btns.pack(pady=5)
-        ttk.Button(frame_left_btns, text="➕ 사진 추가", command=self.add_files).pack(side='left', ipadx=5, ipady=5, padx=5, pady=5)
-        ttk.Button(frame_left_btns, text="➖ 선택 삭제", command=self.remove_file).pack(side='right', ipadx=5, ipady=5, padx=5, pady=5)
+        frame_tree_btns = ttk.Frame(frame_left)
+        frame_tree_btns.pack(pady=(5, 10))
+        self.add_btn = ttk.Button(frame_tree_btns, text="➕ 사진 추가", command=self.add_files)
+        self.add_btn.pack(side='left', ipadx=5, ipady=5, padx=5)
+        self.remove_btn = ttk.Button(frame_tree_btns, text="➖ 선택 삭제", command=self.remove_file)
+        self.remove_btn.pack(side='right', ipadx=5, ipady=5, padx=5)
 
-        # 파일 목록 (Treeview)
-        scrollbar = ttk.Scrollbar(frame_left)
-        scrollbar.pack(side='right', fill='y')
-        self.tree = ttk.Treeview(frame_left, columns=("filename", "date"), show='headings', height=25, yscrollcommand=scrollbar.set)
+        self.tree_scrollbar = ttk.Scrollbar(frame_left)
+        self.tree_scrollbar.pack(side='right', fill='y')
+        self.tree = ttk.Treeview(frame_left, columns=("filename", "date"), show='headings', height=30, yscrollcommand=self.tree_scrollbar.set)
         self.tree.heading("filename", text="파일명")
         self.tree.heading("date", text="촬영일")
         self.tree.column("filename", anchor='w')
         self.tree.column("date", anchor='center')
         self.tree.pack(fill='both', expand=True)
         self.tree.bind("<<TreeviewSelect>>", self.on_file_select)
-        scrollbar.config(command=self.tree.yview)
+        self.tree_scrollbar.config(command=self.tree.yview)
 
         # 우측 프레임
-        frame_right = ttk.Frame(self.root, padding=5)
-        frame_right.pack(side='right', fill='both', expand=True, padx=5, pady=5)
+        frame_right = ttk.Frame(self.root)
+        frame_right.pack(side='right', fill='both', expand=True, padx=(5, 15), pady=15)
 
-        # 사진 미리보기
         self.preview_label = ttk.Label(frame_right, text="선택한 파일 없음", anchor='center')
         self.preview_label.pack(fill='both', expand=True)
 
-        # 촬영일 (수정 가능)
-        ttk.Label(frame_right, text="날짜 (YYYY-MM-DD)").pack()
-        self.date_entry = ttk.Entry(frame_right)
-        self.date_entry.pack()
+        # 미리보기 하단 프레임 (날짜 수정 및 사진 회전 기능)
+        frame_preview_tools = ttk.Frame(frame_right)
+        frame_preview_tools.pack(pady=(15, 0))
+        ttk.Label(frame_preview_tools, text="촬영일 (YYYY-MM-DD): ").pack(side='left')
+        self.date_entry = ttk.Entry(frame_preview_tools)
+        self.date_entry.pack(side='left', fill='x', expand=True)
         self.date_entry.bind("<KeyRelease>", self.commit_date)
-
-        # 사진 회전
-        ttk.Button(frame_right, text="↺ 사진 회전", command=self.rotate_image).pack()
+        self.rotate_btn = ttk.Button(frame_preview_tools, text="↺  사진 회전", command=self.rotate_image)
+        self.rotate_btn.pack(side='right', ipadx=5, ipady=5, padx=(30, 0))
 
         # 워터마크 옵션 패널
-        frame_options = ttk.LabelFrame(frame_right, text="워터마크 옵션 (일괄 적용)")
-        frame_options.pack(fill='x', padx=5, pady=5)
-        for col in range(8):
+        frame_options = ttk.LabelFrame(frame_right, text="워터마크 옵션 (일괄 적용)", padding=5)
+        frame_options.pack(fill='x', pady=(15, 0))
+        for col in range(4):
             frame_options.columnconfigure(col, weight=1)
 
-        ttk.Label(frame_options, text="글꼴").grid(row=0, column=0)
-        self.font_combo = ttk.Combobox(frame_options, textvariable=self.font_name, values=list(self.font_map.keys()), state='readonly')
-        self.font_combo.grid(row=0, column=1)
+        # 1행: 글꼴, 크기, 글자색, 배경색
+        ttk.Label(frame_options, text="글꼴").grid(row=0, column=0, sticky='w', padx=5, pady=2)
+        self.font_name_combo = ttk.Combobox(frame_options, textvariable=self.font_name, values=list(self.font_map.keys()), state='readonly')
+        self.font_name_combo.grid(row=1, column=0, sticky='we', padx=5)
 
-        ttk.Label(frame_options, text="크기").grid(row=0, column=2)
-        ttk.Spinbox(frame_options, from_=1, to=999, textvariable=self.font_size).grid(row=0, column=3)
+        ttk.Label(frame_options, text="크기").grid(row=0, column=1, sticky='w', padx=5, pady=2)
+        self.font_size_spin = ttk.Spinbox(frame_options, from_=1, to=999, textvariable=self.font_size, width=7)
+        self.font_size_spin.grid(row=1, column=1, sticky='we', padx=5)
 
-        ttk.Label(frame_options, text="단위").grid(row=0, column=4)
-        ttk.Combobox(frame_options, textvariable=self.size_mode, values=["픽셀(px)", "백분율(%)"], state='readonly').grid(row=0, column=5)
+        ttk.Label(frame_options, text="글자 색").grid(row=0, column=2, sticky='w', padx=5, pady=2)
+        self.font_color_btn = ttk.Button(frame_options, text="편집", command=self.choose_font_color)
+        self.font_color_btn.grid(row=1, column=2, sticky='we', padx=5)
+        
+        ttk.Label(frame_options, text="배경 색").grid(row=0, column=3, sticky='w', padx=5, pady=2)
+        self.bg_color_btn = ttk.Button(frame_options, text="편집", command=self.choose_bg_color)
+        self.bg_color_btn.grid(row=1, column=3, sticky='we', padx=5)
 
-        frame_color_btns = ttk.Frame(frame_options)
-        frame_color_btns.grid(row=0, column=6, columnspan=2)
-        ttk.Button(frame_color_btns, text="글자색 편집", command=self.choose_font_color).pack(side='left')
-        ttk.Button(frame_color_btns, text="배경색 편집", command=self.choose_bg_color).pack(side='right')
+        # 2행: 위치, 여백, _, 배경 투명도
+        ttk.Label(frame_options, text="위치").grid(row=2, column=0, sticky='w', padx=5, pady=(8, 2))
+        self.position_combo = ttk.Combobox(frame_options, textvariable=self.position, values=["좌측 상단", "우측 상단", "좌측 하단", "우측 하단", "중앙"], state='readonly')
+        self.position_combo.grid(row=3, column=0, sticky='we', padx=5)
 
-        ttk.Label(frame_options, text="위치").grid(row=1, column=0)
-        ttk.Combobox(frame_options, textvariable=self.position, values=["좌측 상단", "우측 상단", "좌측 하단", "우측 하단", "중앙"], state='readonly').grid(row=1, column=1)
+        ttk.Label(frame_options, text="여백").grid(row=2, column=1, sticky='w', padx=5, pady=(8, 2))
+        self.margin_spin = ttk.Spinbox(frame_options, from_=0, to=999, textvariable=self.margin, width=7)
+        self.margin_spin.grid(row=3, column=1, sticky='we', padx=5)
 
-        ttk.Label(frame_options, text="여백").grid(row=1, column=2)
-        ttk.Spinbox(frame_options, from_=1, to=999, textvariable=self.margin).grid(row=1, column=3)
+        ttk.Label(frame_options, text="배경 불투명도").grid(row=2, column=3, sticky='w', padx=5, pady=(8, 2))
+        self.bg_opacity_spin = ttk.Spinbox(frame_options, from_=0, to=100, textvariable=self.bg_opacity, width=7)
+        self.bg_opacity_spin.grid(row=3, column=3, sticky='we', padx=5)
 
-        ttk.Label(frame_options, text="단위").grid(row=1, column=4)
-        ttk.Combobox(frame_options, textvariable=self.size_mode, values=["픽셀(px)", "백분율(%)"], state='readonly').grid(row=1, column=5)
+        # 3행: 날짜 형식, 단위, _, 배경 여백
+        ttk.Label(frame_options, text="날짜 형식").grid(row=4, column=0, sticky='w', padx=5, pady=(8, 2))
+        self.date_format_combo = ttk.Combobox(frame_options, textvariable=self.date_format,
+                     values=["YYYY년 MM월 DD일", "YYYY년 M월 D일", "YYYY-MM-DD", "YYYY. MM. DD.", "YYYY. M. D.", "'YY. MM. DD.", "'YY. M. D.", "M/D/YYYY"])
+        self.date_format_combo.grid(row=5, column=0, sticky='we', padx=5, pady=(0, 10))
 
-        ttk.Label(frame_options, text="날짜 형식").grid(row=1, column=6)
-        ttk.Combobox(frame_options, textvariable=self.date_format,
-                     values=["YYYY년 MM월 DD일", "YYYY년 M월 D일", "YYYY-MM-DD", "YYYY. MM. DD.", "YYYY. M. D.", "'YY. M. D.", "M/D/YYYY"]).grid(row=1, column=7)
+        ttk.Label(frame_options, text="단위").grid(row=4, column=1, sticky='w', padx=5, pady=(8, 2))
+        self.size_mode_combo = ttk.Combobox(frame_options, textvariable=self.size_mode, values=["픽셀(px)", "백분율(%)"], state='readonly', width=10)
+        self.size_mode_combo.grid(row=5, column=1, sticky='we', padx=5, pady=(0, 10))
+
+        ttk.Label(frame_options, text="배경 여백").grid(row=4, column=3, sticky='w', padx=5, pady=(8, 2))
+        self.bg_padding_spin = ttk.Spinbox(frame_options, from_=0, to=999, textvariable=self.bg_padding, width=7, state='disabled')
+        self.bg_padding_spin.grid(row=5, column=3, sticky='we', padx=5, pady=(0, 10))
 
         # 워터마크 옵션 변경 시 미리보기 갱신
         vars_to_trace = (
@@ -165,6 +195,8 @@ class WatermarkApp:
             self.font_size,
             self.font_color,
             self.bg_color,
+            self.bg_opacity,
+            self.bg_padding,
             self.position,
             self.margin,
             self.size_mode,
@@ -173,15 +205,25 @@ class WatermarkApp:
         for v in vars_to_trace:
             v.trace_add("write", lambda *args: self.render_preview())
 
-        # 결과 저장 옵션
+        # 결과 저장 옵션 및 작업 진행률 표시
         frame_save = ttk.Frame(frame_right)
-        frame_save.pack(side='bottom', fill='x', anchor='center')
-        frame_save.columnconfigure(1, weight=1)
-        ttk.Label(frame_save, text="저장 방식").grid(row=0, column=0, rowspan=2)
-        ttk.Radiobutton(frame_save, text="덮어쓰기", variable=self.save_mode, value="overwrite").grid(row=0, column=1)
-        ttk.Radiobutton(frame_save, text="별도 폴더", variable=self.save_mode, value="separate").grid(row=1, column=1)
-        ttk.Button(frame_save, text="✨ 워터마크 적용", command=self.apply_watermarks).grid(row=0, column=2, rowspan=2, sticky='nsew')
+        frame_save.pack(side='bottom', fill='x', pady=(15, 0))
+        for col in range(3):
+            frame_save.columnconfigure(col, weight=1)
 
+        frame_save_radios = ttk.Frame(frame_save)
+        frame_save_radios.grid(row=0, column=0, columnspan=2, sticky='w')
+        ttk.Label(frame_save_radios, text="파일 저장 방식: ").pack(side='left')
+        self.save_mode_radio_ow = ttk.Radiobutton(frame_save_radios, text="덮어쓰기", variable=self.save_mode, value="overwrite")
+        self.save_mode_radio_ow.pack(side='left', padx=5)
+        self.save_mode_radio_sep = ttk.Radiobutton(frame_save_radios, text="별도 폴더", variable=self.save_mode, value="separate")
+        self.save_mode_radio_sep.pack(side='left', padx=5)
+
+        self.progress_bar = ttk.Progressbar(frame_save, mode='determinate', orient='horizontal')
+        self.progress_bar.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(5, 0))
+
+        self.apply_button = ttk.Button(frame_save, text="✨ 워터마크 적용", command=self.apply_watermarks)
+        self.apply_button.grid(row=0, column=2, rowspan=2, sticky='nsew', padx=(10, 0))
 
 
     def add_files(self):
@@ -207,18 +249,9 @@ class WatermarkApp:
             return
         self.selected_index = self.tree.index(selected[-1]) # Treeview 중복 선택 시 마지막 선택 항목만 처리
         file_info = self.files[self.selected_index]
-        try:
-            img = Image.open(file_info["path"])
-            img = ImageOps.exif_transpose(img)
-            img.thumbnail((500, 500))
-            self.preview_img = ImageTk.PhotoImage(img)
-            self.preview_label.config(image=self.preview_img, text="")
-            self.date_entry.delete(0, 'end')
-            self.date_entry.insert(0, file_info["date_str"])
-            self.render_preview()
-        except Exception:
-            self.preview_label.config(text="⚠️ 미리보기 불가")
-            self.date_entry.delete(0, 'end')
+        self.date_entry.delete(0, 'end')
+        self.date_entry.insert(0, file_info["date_str"])
+        self.render_preview()
 
     def commit_date(self, *args):
         if self.selected_index is not None:
@@ -231,16 +264,12 @@ class WatermarkApp:
             self.render_preview()
 
     def choose_font_color(self):
-        color = colorchooser.askcolor(title="글자색 선택")  # color[0]: RGB 색상 값 / color[1]: 16진수 str
-        if color[1]:
-            self.font_color.set(color[1])
+        color = colorchooser.askcolor(title="글자 색 선택")  # color[0]: RGB 값 / color[1]: 16진수 str
+        if color[1]: self.font_color.set(color[1])
 
     def choose_bg_color(self):
-        color = colorchooser.askcolor(title="배경색 선택")
-        if color[1]:
-            self.bg_color.set(color[1])
-        else:
-            self.bg_color.set("none")
+        color = colorchooser.askcolor(title="배경 색 선택")
+        if color[1]: self.bg_color.set(color[1])
 
     def get_position(self, size, margin, position):
         """
@@ -288,10 +317,10 @@ class WatermarkApp:
         return dict(sorted(font_map.items()))
 
     def _draw_watermark(self, img, date_str):
-        # 날짜 포맷 적용
-        date_text = format_date(date_str, self.date_format.get())
-        if not date_text:
-            return img.convert("RGBA") # 날짜 없으면 원본 이미지 반환
+        try:
+            date_text = format_date(date_str, self.date_format.get())
+        except (ValueError, TypeError, AttributeError):
+            return img.convert("RGBA")  # 날짜 없으면 원본 이미지 반환
 
         # 텍스트 레이어 생성
         txt_layer = Image.new("RGBA", img.size, (255, 255, 255, 0))
@@ -299,16 +328,15 @@ class WatermarkApp:
 
         # 텍스트 및 여백 크기 로드
         if self.size_mode.get() == "픽셀(px)":
-            font_px = float(self.font_size.get())
-            margin_px = float(self.margin.get())
+            font_px = self.font_size.get()
+            margin_px = self.margin.get()
         elif self.size_mode.get() == "백분율(%)":
-            font_px = float(max(img.width, img.height) * (self.font_size.get() / 100.0))
-            margin_px = float(max(img.width, img.height) * (self.margin.get() / 100.0))
+            font_px = max(img.width, img.height) * (self.font_size.get() / 100.0)
+            margin_px = max(img.width, img.height) * (self.margin.get() / 100.0)
 
         # 텍스트 스타일 로드
         try:
             font_path = self.font_map.get(self.font_name.get())
-            if not font_path: raise Exception
             font = ImageFont.truetype(font_path, font_px)
         except Exception as e:
             print(f"Font loading failed: {e}. Falling back to default font.")
@@ -318,11 +346,14 @@ class WatermarkApp:
         pos, anchor = self.get_position(img.size, margin_px, self.position.get())
         bbox = draw.textbbox(pos, date_text, font=font, anchor=anchor)
         
-        # 배경 적용
-        bg_color = self.bg_color.get()
-        if bg_color and bg_color.lower() != "none":
-            draw.rectangle(bbox, fill=bg_color)
-        
+        # 텍스트 배경 적용
+        bg_color_hex = self.bg_color.get()
+        if bg_color_hex:
+            pad = self.bg_padding.get()
+            bg_box = (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad)
+            rgba_fill = hex_to_rgba(bg_color_hex, self.bg_opacity.get())
+            draw.rectangle(bg_box, fill=rgba_fill)
+
         # 텍스트 적용
         draw.text(pos, date_text, font=font, fill=self.font_color.get(), anchor=anchor)
 
@@ -334,27 +365,31 @@ class WatermarkApp:
             return
         file_info = self.files[self.selected_index]
         try:
-            img = Image.open(file_info["path"])
-            img = ImageOps.exif_transpose(img)
+            with Image.open(file_info["path"]) as img:
+                img = ImageOps.exif_transpose(img)
+                if file_info.get("rotation", 0) != 0:
+                    img = img.rotate(file_info["rotation"], expand=True)
 
-            if file_info.get("rotation", 0) != 0:
-                img = img.rotate(file_info["rotation"], expand=True)
+                watermarked_img = self._draw_watermark(img, file_info["date_str"])
+                preview_img = watermarked_img.convert("RGB")
+                preview_img.thumbnail((500, 500))
 
-            watermarked_img = self._draw_watermark(img, file_info["date_str"])
-            preview_img = watermarked_img.convert("RGB")
-            preview_img.thumbnail((500, 500))
-
-            self.preview_img = ImageTk.PhotoImage(preview_img)
-            self.preview_label.config(image=self.preview_img, text="")
+                self.preview_img = ImageTk.PhotoImage(preview_img)
+                self.preview_label.config(image=self.preview_img, text="")
         except Exception as e:
             print(f"Preview Error Occured: {e}")
-            self.preview_label.config(text="⚠️ 미리보기 불가")
+            self.preview_label.config(image="", text="⚠️ 미리보기 오류")
+
+    def toggle_ui_state(self):
+        pass
+
+    def start_stop_processing(self):
+        pass
     
     def apply_watermarks(self):
         if not self.files:
             messagebox.showwarning("경고", "처리할 파일이 없습니다.")
             return
-        
         if self.save_mode.get() == "overwrite":
             if not messagebox.askyesno("확인", "원본 파일을 덮어쓰면 복구할 수 없습니다.\n정말 덮어쓰기 저장 방식으로 진행할까요?"):
                 return
@@ -407,7 +442,9 @@ class WatermarkApp:
                 self.font_name.set(data.get("font_name", list(self.font_map.keys())[0]))
                 self.font_size.set(data.get("font_size", 48))
                 self.font_color.set(data.get("font_color", "#000000"))
-                self.bg_color.set(data.get("bg_color", ""))
+                self.bg_color.set(data.get("bg_color", "#FFFFFF"))
+                self.bg_opacity.set(data.get("bg_opacity", 100))
+                self.bg_padding.set(data.get("bg_padding", 5))
                 self.position.set(data.get("position", "우측 하단"))
                 self.margin.set(data.get("margin", 20))
                 self.size_mode.set(data.get("size_mode", "픽셀(px)"))
@@ -422,6 +459,8 @@ class WatermarkApp:
             "font_size": self.font_size.get(),
             "font_color": self.font_color.get(),
             "bg_color": self.bg_color.get(),
+            "bg_opacity": self.bg_opacity.get(),
+            "bg_padding": self.bg_padding.get(),
             "position": self.position.get(),
             "margin": self.margin.get(),
             "size_mode": self.size_mode.get(),
