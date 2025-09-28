@@ -1,0 +1,9 @@
+#.gitignore
+settings.json
+/watermarked
+test/
+*.jpg
+*.jpeg
+*.png
+!icon_image_16.png
+!icon_image_128.png

@@ -1,14 +1,16 @@
 # pip install Pillow
 # pip install matplotlib
-import os, json
+import os, json, threading
 import tkinter as tk
 from tkinter import ttk, filedialog, colorchooser, messagebox, font
 from PIL import Image, ImageOps, ImageTk, ImageDraw, ImageFont, ExifTags
 from matplotlib import font_manager
 from datetime import datetime
 
-APP_VERSION = "v0.25.9.5"
+APP_VERSION = "v0.25.9.6"
 CONFIG_FILE = "settings.json"
+ICON_FILE = "icon_image_128.png"
+ICON_FILE_16 = "icon_image_16.png"
 GITHUB_URL = "https://github.com/1st-world/photoEdit"
 
 
@@ -75,23 +77,27 @@ class WatermarkApp:
     def __init__(self, root):
         self.root = root
         self.root.title(f"촬영일 워터마크 삽입기 ({APP_VERSION})")
+        self.root.iconphoto(True, tk.PhotoImage(file=ICON_FILE), tk.PhotoImage(file=ICON_FILE_16))
         self.settings_file = CONFIG_FILE
 
         # 변수 초기화
         self.files = []
         self.selected_index = None
         self.font_map = self.get_font_map()
+        self.resize_job_id = None
+        self.is_processing = False
+        self.processing_thread = None
 
         # Tk 변수 초기화
         self.font_name = tk.StringVar(value=list(self.font_map.keys())[0])
-        self.font_size = tk.DoubleVar(value=48)
+        self.font_size = tk.DoubleVar(value=3)
         self.font_color = tk.StringVar(value="#000000")
         self.bg_color = tk.StringVar(value="#FFFFFF")
-        self.bg_opacity = tk.DoubleVar(value=100)
-        self.bg_padding = tk.DoubleVar(value=5)
+        self.bg_opacity = tk.IntVar(value=50)
+        self.bg_padding = tk.DoubleVar(value=1)
         self.position = tk.StringVar(value="우측 하단")
-        self.margin = tk.DoubleVar(value=20)
-        self.size_mode = tk.StringVar(value="픽셀(px)")
+        self.margin = tk.DoubleVar(value=3)
+        self.size_mode = tk.StringVar(value="백분율(%)")
         self.date_format = tk.StringVar(value="YYYY-MM-DD")
         self.save_mode = tk.StringVar(value="separate")
 
@@ -126,7 +132,12 @@ class WatermarkApp:
         frame_right = ttk.Frame(self.root)
         frame_right.pack(side='right', fill='both', expand=True, padx=(5, 15), pady=15)
 
-        self.preview_label = ttk.Label(frame_right, text="선택한 파일 없음", anchor='center')
+        # 미리보기 프레임
+        frame_preview = ttk.Frame(frame_right)
+        frame_preview.pack(fill='both', expand=True)
+        frame_preview.pack_propagate(False) # 레이아웃 전파 차단 -> 자식 위젯 크기와 무관하게 프레임 크기 유지
+        frame_preview.bind("<Configure>", self.on_resize)
+        self.preview_label = ttk.Label(frame_preview, text="선택한 파일 없음", font=font.Font(weight='bold'), anchor='center')
         self.preview_label.pack(fill='both', expand=True)
 
         # 미리보기 하단 프레임 (날짜 수정 및 사진 회전 기능)
@@ -143,15 +154,15 @@ class WatermarkApp:
         frame_options = ttk.LabelFrame(frame_right, text="워터마크 옵션 (일괄 적용)", padding=5)
         frame_options.pack(fill='x', pady=(15, 0))
         for col in range(4):
-            frame_options.columnconfigure(col, weight=1)
+            frame_options.columnconfigure(col, weight=1, minsize=120)
 
-        # 1행: 글꼴, 크기, 글자색, 배경색
+        # 1행: 글꼴, 크기, 글자 색, 배경 색
         ttk.Label(frame_options, text="글꼴").grid(row=0, column=0, sticky='w', padx=5, pady=2)
         self.font_name_combo = ttk.Combobox(frame_options, textvariable=self.font_name, values=list(self.font_map.keys()), state='readonly')
         self.font_name_combo.grid(row=1, column=0, sticky='we', padx=5)
 
         ttk.Label(frame_options, text="크기").grid(row=0, column=1, sticky='w', padx=5, pady=2)
-        self.font_size_spin = ttk.Spinbox(frame_options, from_=1, to=999, textvariable=self.font_size, width=7)
+        self.font_size_spin = ttk.Spinbox(frame_options, from_=1, to=999, increment=0.1, textvariable=self.font_size, width=7)
         self.font_size_spin.grid(row=1, column=1, sticky='we', padx=5)
 
         ttk.Label(frame_options, text="글자 색").grid(row=0, column=2, sticky='w', padx=5, pady=2)
@@ -162,20 +173,20 @@ class WatermarkApp:
         self.bg_color_btn = ttk.Button(frame_options, text="편집", command=self.choose_bg_color)
         self.bg_color_btn.grid(row=1, column=3, sticky='we', padx=5)
 
-        # 2행: 위치, 여백, _, 배경 투명도
+        # 2행: 위치, 여백, _, 배경 불투명도
         ttk.Label(frame_options, text="위치").grid(row=2, column=0, sticky='w', padx=5, pady=(8, 2))
         self.position_combo = ttk.Combobox(frame_options, textvariable=self.position, values=["좌측 상단", "우측 상단", "좌측 하단", "우측 하단", "중앙"], state='readonly')
         self.position_combo.grid(row=3, column=0, sticky='we', padx=5)
 
         ttk.Label(frame_options, text="여백").grid(row=2, column=1, sticky='w', padx=5, pady=(8, 2))
-        self.margin_spin = ttk.Spinbox(frame_options, from_=0, to=999, textvariable=self.margin, width=7)
+        self.margin_spin = ttk.Spinbox(frame_options, from_=0, to=999, increment=0.1, textvariable=self.margin, width=7)
         self.margin_spin.grid(row=3, column=1, sticky='we', padx=5)
 
         ttk.Label(frame_options, text="배경 불투명도").grid(row=2, column=3, sticky='w', padx=5, pady=(8, 2))
-        self.bg_opacity_spin = ttk.Spinbox(frame_options, from_=0, to=100, textvariable=self.bg_opacity, width=7)
-        self.bg_opacity_spin.grid(row=3, column=3, sticky='we', padx=5)
+        self.bg_opacity_scale = ttk.Scale(frame_options, from_=0, to=100, variable=self.bg_opacity, orient='horizontal')
+        self.bg_opacity_scale.grid(row=3, column=3, sticky='we', padx=5)
 
-        # 3행: 날짜 형식, 단위, _, 배경 여백
+        # 3행: 날짜 형식, 단위, _, 배경 크기
         ttk.Label(frame_options, text="날짜 형식").grid(row=4, column=0, sticky='w', padx=5, pady=(8, 2))
         self.date_format_combo = ttk.Combobox(frame_options, textvariable=self.date_format,
                      values=["YYYY년 MM월 DD일", "YYYY년 M월 D일", "YYYY-MM-DD", "YYYY. MM. DD.", "YYYY. M. D.", "'YY. MM. DD.", "'YY. M. D.", "M/D/YYYY"])
@@ -185,8 +196,8 @@ class WatermarkApp:
         self.size_mode_combo = ttk.Combobox(frame_options, textvariable=self.size_mode, values=["픽셀(px)", "백분율(%)"], state='readonly', width=10)
         self.size_mode_combo.grid(row=5, column=1, sticky='we', padx=5, pady=(0, 10))
 
-        ttk.Label(frame_options, text="배경 여백").grid(row=4, column=3, sticky='w', padx=5, pady=(8, 2))
-        self.bg_padding_spin = ttk.Spinbox(frame_options, from_=0, to=999, textvariable=self.bg_padding, width=7, state='disabled')
+        ttk.Label(frame_options, text="배경 크기").grid(row=4, column=3, sticky='w', padx=5, pady=(8, 2))
+        self.bg_padding_spin = ttk.Spinbox(frame_options, from_=0, to=999, increment=0.1, textvariable=self.bg_padding, width=7)
         self.bg_padding_spin.grid(row=5, column=3, sticky='we', padx=5, pady=(0, 10))
 
         # 워터마크 옵션 변경 시 미리보기 갱신
@@ -222,7 +233,7 @@ class WatermarkApp:
         self.progress_bar = ttk.Progressbar(frame_save, mode='determinate', orient='horizontal')
         self.progress_bar.grid(row=1, column=0, columnspan=2, sticky='ew', pady=(5, 0))
 
-        self.apply_button = ttk.Button(frame_save, text="✨ 워터마크 적용", command=self.apply_watermarks)
+        self.apply_button = ttk.Button(frame_save, text="✨ 워터마크 적용", command=self.start_stop_processing)
         self.apply_button.grid(row=0, column=2, rowspan=2, sticky='nsew', padx=(10, 0))
 
 
@@ -240,13 +251,12 @@ class WatermarkApp:
             self.tree.delete(item)
             self.files.pop(idx)
             self.selected_index = None
-            self.preview_label.config(image="", text="선택한 파일 없음")
+            self.preview_label.config(image="", foreground="", text="선택한 파일 없음")
             self.date_entry.delete(0, 'end')
 
     def on_file_select(self, event):
         selected = self.tree.selection()
-        if not selected:
-            return
+        if not selected: return
         self.selected_index = self.tree.index(selected[-1]) # Treeview 중복 선택 시 마지막 선택 항목만 처리
         file_info = self.files[self.selected_index]
         self.date_entry.delete(0, 'end')
@@ -301,15 +311,7 @@ class WatermarkApp:
         for font_path in fonts:
             try:
                 name, style = ImageFont.truetype(font_path).getname()
-                if style.lower() in ["regular", "normal"]:
-                    font_display_name = name
-                else:
-                    # 이름이 스타일로 끝나지 않을 때만 스타일 추가
-                    if not name.endswith(style):
-                         font_display_name = f"{name} {style}"
-                    else:
-                         font_display_name = name
-
+                font_display_name = name if style.lower() in ["regular", "normal"] or name.endswith(style) else f"{name} {style}"
                 if font_display_name not in font_map:   # 이름 중복 시 첫 번째만 사용
                     font_map[font_display_name] = font_path
             except Exception:
@@ -327,12 +329,15 @@ class WatermarkApp:
         draw = ImageDraw.Draw(txt_layer)
 
         # 텍스트 및 여백 크기 로드
+        base_size = max(img.width, img.height)
         if self.size_mode.get() == "픽셀(px)":
             font_px = self.font_size.get()
             margin_px = self.margin.get()
+            padding_px = self.bg_padding.get()
         elif self.size_mode.get() == "백분율(%)":
-            font_px = max(img.width, img.height) * (self.font_size.get() / 100.0)
-            margin_px = max(img.width, img.height) * (self.margin.get() / 100.0)
+            font_px = base_size * (self.font_size.get() / 100.0)
+            margin_px = base_size * (self.margin.get() / 100.0)
+            padding_px = base_size * (self.bg_padding.get() / 100.0)
 
         # 텍스트 스타일 로드
         try:
@@ -349,8 +354,7 @@ class WatermarkApp:
         # 텍스트 배경 적용
         bg_color_hex = self.bg_color.get()
         if bg_color_hex:
-            pad = self.bg_padding.get()
-            bg_box = (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad)
+            bg_box = (bbox[0] - padding_px, bbox[1] - padding_px, bbox[2] + padding_px, bbox[3] + padding_px)
             rgba_fill = hex_to_rgba(bg_color_hex, self.bg_opacity.get())
             draw.rectangle(bg_box, fill=rgba_fill)
 
@@ -361,8 +365,7 @@ class WatermarkApp:
         return Image.alpha_composite(img.convert("RGBA"), txt_layer)
 
     def render_preview(self):
-        if self.selected_index is None:
-            return
+        if self.selected_index is None: return
         file_info = self.files[self.selected_index]
         try:
             with Image.open(file_info["path"]) as img:
@@ -372,28 +375,65 @@ class WatermarkApp:
 
                 watermarked_img = self._draw_watermark(img, file_info["date_str"])
                 preview_img = watermarked_img.convert("RGB")
-                preview_img.thumbnail((500, 500))
+                width, height = self.preview_label.winfo_width(), self.preview_label.winfo_height() # 이미지 크기 동적 조절
+                preview_img.thumbnail((width, height))
 
                 self.preview_img = ImageTk.PhotoImage(preview_img)
                 self.preview_label.config(image=self.preview_img, text="")
         except Exception as e:
             print(f"Preview Error Occured: {e}")
-            self.preview_label.config(image="", text="⚠️ 미리보기 오류")
+            self.preview_label.config(image="", foreground="#FF6600", text="⚠️ 미리보기 오류:\n\n설정한 값들이 유효하지 않을 수 있습니다.")
 
-    def toggle_ui_state(self):
-        pass
+    def on_resize(self, event):
+        if self.resize_job_id:  # 이전에 예약된 작업 취소
+            self.root.after_cancel(self.resize_job_id)
+        
+        self.resize_job_id = self.root.after(150, self.render_preview)  # 150ms(0.15초) 후 render_preview 실행하도록 예약
+
+    def toggle_ui_state(self, is_disabled):
+        state = 'disabled' if is_disabled else 'normal'
+        readonly_state = 'disabled' if is_disabled else 'readonly'
+        
+        # 제어할 위젯 목록
+        widgets_to_control = [
+            self.add_btn, self.remove_btn, self.tree, self.date_entry, self.rotate_btn,
+            self.font_name_combo, self.font_size_spin, self.font_color_btn, self.bg_color_btn,
+            self.position_combo, self.margin_spin, self.bg_opacity_scale,
+            self.date_format_combo, self.size_mode_combo, self.bg_padding_spin,
+            self.save_mode_radio_ow, self.save_mode_radio_sep
+        ]
+
+        for widget in widgets_to_control:
+            try:
+                if isinstance(widget, (ttk.Combobox)) and (widget != self.date_format_combo):
+                    widget.config(state=readonly_state)
+                else:
+                    widget.config(state=state)
+            except tk.TclError:
+                pass    # state 속성이 없는 위젯은 통과
 
     def start_stop_processing(self):
-        pass
-    
-    def apply_watermarks(self):
-        if not self.files:
-            messagebox.showwarning("경고", "처리할 파일이 없습니다.")
-            return
-        if self.save_mode.get() == "overwrite":
-            if not messagebox.askyesno("확인", "원본 파일을 덮어쓰면 복구할 수 없습니다.\n정말 덮어쓰기 저장 방식으로 진행할까요?"):
+        if self.is_processing:
+            self.is_processing = False
+            self.apply_button.config(text="중단 중...", state='disabled')
+        else:
+            if not self.files:
+                messagebox.showwarning("경고", "처리할 파일이 없습니다.")
                 return
-        
+            if self.save_mode.get() == "overwrite":
+                if not messagebox.askyesno("확인", "원본 파일을 덮어쓰면 복구할 수 없습니다.\n정말 이대로 진행할까요?"):
+                    return
+                
+            self.is_processing = True
+            self.toggle_ui_state(is_disabled=True)
+            self.apply_button.config(text="⏹️ 작업 중단")
+            self.progress_bar['maximum'] = len(self.files)
+            self.progress_bar['value'] = 0
+
+            self.processing_thread = threading.Thread(target=self._apply_watermarks_thread, daemon=True)
+            self.processing_thread.start()
+    
+    def _apply_watermarks_thread(self):        
         save_mode = self.save_mode.get()
         output_dir = "watermarked"
         if save_mode == "separate":
@@ -402,36 +442,43 @@ class WatermarkApp:
         success, skipped, failed = 0, 0, 0
 
         for i, file_info in enumerate(self.files):
+            if not self.is_processing: break
             try:
-                date_str = file_info["date_str"]
-                if not date_str:
+                if not file_info["date_str"]:
                     skipped += 1
                     continue
+                with Image.open(file_info["path"]) as img:
+                    img = ImageOps.exif_transpose(img)
+                    exif_bytes = img.info.get("exif")   # Orientation 값을 제외한 EXIF 데이터 보존
 
-                img = Image.open(file_info["path"])
-                img = ImageOps.exif_transpose(img)
-                exif_bytes = img.info.get("exif")   # Orientation 값을 제외한 EXIF 데이터 보존
+                    if file_info.get("rotation", 0) != 0:
+                        img = img.rotate(file_info["rotation"], expand=True)
 
-                if file_info.get("rotation", 0) != 0:
-                    img = img.rotate(file_info["rotation"], expand=True)
+                    watermarked_img = self._draw_watermark(img, file_info["date_str"])
+                    out_img = watermarked_img.convert("RGB")
 
-                watermarked_img = self._draw_watermark(img, date_str)
-                out_img = watermarked_img.convert("RGB")
-
-                if save_mode == "overwrite":
-                    out_img.save(file_info["path"], **({"exif": exif_bytes} if exif_bytes else {}))
-                elif save_mode == "separate":
-                    base = os.path.basename(file_info["path"])
-                    out_img.save(os.path.join(output_dir, base), **({"exif": exif_bytes} if exif_bytes else {}))
+                    if save_mode == "overwrite":
+                        out_img.save(file_info["path"], **({"exif": exif_bytes} if exif_bytes else {}))
+                    elif save_mode == "separate":
+                        base = os.path.basename(file_info["path"])
+                        out_img.save(os.path.join(output_dir, base), **({"exif": exif_bytes} if exif_bytes else {}))
                 
                 success += 1
             except Exception as e:
                 failed += 1
                 print(f"Apply Error Occured: {e}")
                 messagebox.showerror("오류 발생", f"{file_info['path']}\n\n{e}")
+            
+            self.root.after(0, self.progress_bar.config, {'value': i + 1})
 
-        message = f"요청하신 작업을 다음과 같이 처리했습니다.\n\n완료한 파일: {success}개\n건너뛴 파일: {skipped}개\n실패한 파일: {failed}개"
-        messagebox.showinfo("작업 결과", message)
+        self.root.after(0, self.on_process_finished, success, skipped, failed)
+        
+    def on_process_finished(self, success, skipped, failed):
+        self.is_processing = False
+        self.toggle_ui_state(is_disabled=False)
+        self.apply_button.config(text="✨ 워터마크 적용", state='normal')
+        self.progress_bar['value'] = 0
+        messagebox.showinfo("작업 결과", f"요청하신 작업을 다음과 같이 처리했습니다.\n\n완료한 파일: {success}개\n건너뛴 파일: {skipped}개\n실패한 파일: {failed}개")
 
 
     def load_settings(self):
@@ -440,14 +487,14 @@ class WatermarkApp:
                 with open(self.settings_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 self.font_name.set(data.get("font_name", list(self.font_map.keys())[0]))
-                self.font_size.set(data.get("font_size", 48))
+                self.font_size.set(data.get("font_size", 3))
                 self.font_color.set(data.get("font_color", "#000000"))
                 self.bg_color.set(data.get("bg_color", "#FFFFFF"))
-                self.bg_opacity.set(data.get("bg_opacity", 100))
-                self.bg_padding.set(data.get("bg_padding", 5))
+                self.bg_opacity.set(data.get("bg_opacity", 50))
+                self.bg_padding.set(data.get("bg_padding", 1))
                 self.position.set(data.get("position", "우측 하단"))
-                self.margin.set(data.get("margin", 20))
-                self.size_mode.set(data.get("size_mode", "픽셀(px)"))
+                self.margin.set(data.get("margin", 3))
+                self.size_mode.set(data.get("size_mode", "백분율(%)"))
                 self.date_format.set(data.get("date_format", "YYYY-MM-DD"))
                 self.save_mode.set(data.get("save_mode", "separate"))
             except Exception:
@@ -471,8 +518,16 @@ class WatermarkApp:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def on_close(self):
-        self.save_settings()
-        self.root.destroy()
+        if self.is_processing:
+            if messagebox.askyesno("확인", "작업이 진행 중입니다. 정말로 종료할까요?"):
+                if self.is_processing:
+                    self.is_processing = False
+                    self.processing_thread.join(timeout=2)
+                self.save_settings()
+                self.root.destroy()
+        else:
+            self.save_settings()
+            self.root.destroy()
 
 
 if __name__ == "__main__":
