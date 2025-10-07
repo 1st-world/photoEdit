@@ -1,13 +1,13 @@
-# pip install Pillow
-# pip install matplotlib
+# pip install Pillow matplotlib
 import os, json, threading
 import tkinter as tk
 from tkinter import ttk, filedialog, colorchooser, messagebox, font
 from PIL import Image, ImageOps, ImageTk, ImageDraw, ImageFont, ExifTags
 from matplotlib import font_manager
 from datetime import datetime
+from tooltip import Tooltip
 
-APP_VERSION = "v0.25.9.6"
+APP_VERSION = "v0.25.10.1"
 CONFIG_FILE = "settings.json"
 ICON_FILE = "icon_image_128.png"
 ICON_FILE_16 = "icon_image_16.png"
@@ -23,23 +23,37 @@ def hex_to_rgba(hex_color: str, alpha_percent: float):
 
 def get_exif_date(path: str) -> str:
     """
-    사진 파일의 EXIF 데이터를 통해 촬영일(DateTime) 값을 추출합니다.\n
-    "YYYY-MM-DD" 형식으로 반환하며, 해당 데이터가 없거나 예외가 발생하면 빈 문자열을 반환합니다.\n
-    가장 일반적인 "YYYY:MM:DD HH:MM:SS" 형식 외에는 현재 지원하지 않습니다.
+    사진 파일의 EXIF 데이터 중 DateTimeOriginal, DateTimeDigitized, DateTime 값을 통해 촬영일을 추출합니다.\n
+    "YYYY-MM-DD" 형식으로 반환하며, 해당 데이터가 없거나 예외가 발생하면 빈 문자열을 반환합니다.
     """
     try:
         with Image.open(path) as img:
-            exif = img.getexif()
-            if exif:
-                # `ExifTags.TAGS` dict 형태{ID: 이름}를 뒤집은 {이름: ID} 생성해 이름으로 ID 찾기
-                exif_tags_reversed = {v: k for k, v in ExifTags.TAGS.items()}
-                date_tag_id = exif_tags_reversed.get("DateTime")
+            exif_data = img.getexif()
+            if exif_data:
+                tag_ids = {name: tid for tid, name in ExifTags.TAGS.items()}
 
-                if date_tag_id is not None and date_tag_id in exif:
-                    date_time = exif.get(date_tag_id)
-                    # "YYYY:MM:DD HH:MM:SS" 형식에서 날짜만 추출
-                    date_part = date_time.split(" ")[0]
-                    return date_part.replace(":", "-")
+                # 우선순위에 따라 탐색할 태그 ID 목록 준비 (태그 이름, IFD 종류)
+                tag_priority = [
+                    ('DateTimeOriginal', 1),   # EXIF IFD: 1
+                    ('DateTimeDigitized', 1),  # EXIF IFD: 1
+                    ('DateTime', 0)            # Main IFD: 0
+                ]
+
+                exif_ifd_pointer_id = tag_ids.get('ExifOffset')
+                exif_ifd = {}
+                if exif_ifd_pointer_id in exif_data:
+                    exif_ifd = exif_data.get_ifd(exif_ifd_pointer_id)
+
+                for tag_name, ifd_type in tag_priority:
+                    tag_id = tag_ids.get(tag_name)
+                    if not tag_id: continue
+
+                    ifd_to_search = exif_data if ifd_type == 0 else exif_ifd
+                    date_str = ifd_to_search.get(tag_id)
+                    
+                    if date_str:
+                        date_part = date_str.split(" ")[0]
+                        return date_part.replace(":", "-")
     except Exception:
         pass
     return ""
@@ -84,7 +98,7 @@ class WatermarkApp:
         self.files = []
         self.selected_index = None
         self.font_map = self.get_font_map()
-        self.resize_job_id = None
+        self.preview_update_job_id = None
         self.is_processing = False
         self.processing_thread = None
 
@@ -136,7 +150,7 @@ class WatermarkApp:
         frame_preview = ttk.Frame(frame_right)
         frame_preview.pack(fill='both', expand=True)
         frame_preview.pack_propagate(False) # 레이아웃 전파 차단 -> 자식 위젯 크기와 무관하게 프레임 크기 유지
-        frame_preview.bind("<Configure>", self.on_resize)
+        frame_preview.bind("<Configure>", self.schedule_preview_update)
         self.preview_label = ttk.Label(frame_preview, text="선택한 파일 없음", font=font.Font(weight='bold'), anchor='center')
         self.preview_label.pack(fill='both', expand=True)
 
@@ -147,11 +161,12 @@ class WatermarkApp:
         self.date_entry = ttk.Entry(frame_preview_tools)
         self.date_entry.pack(side='left', fill='x', expand=True)
         self.date_entry.bind("<KeyRelease>", self.commit_date)
+        Tooltip(self.date_entry, "파일에 기록된 날짜 데이터입니다. 직접 수정할 수 있습니다.\n날짜 수정 시 YYYY-MM-DD 형식으로 맞춰 주세요. (예: 2025-12-31)")
         self.rotate_btn = ttk.Button(frame_preview_tools, text="↺  사진 회전", command=self.rotate_image)
-        self.rotate_btn.pack(side='right', ipadx=5, ipady=5, padx=(30, 0))
+        self.rotate_btn.pack(side='right', ipadx=10, ipady=5, padx=(30, 0))
 
         # 워터마크 옵션 패널
-        frame_options = ttk.LabelFrame(frame_right, text="워터마크 옵션 (일괄 적용)", padding=5)
+        frame_options = ttk.LabelFrame(frame_right, text=" 워터마크 옵션 (일괄 적용) ", padding=5)
         frame_options.pack(fill='x', pady=(15, 0))
         for col in range(4):
             frame_options.columnconfigure(col, weight=1, minsize=120)
@@ -183,20 +198,21 @@ class WatermarkApp:
         self.margin_spin.grid(row=3, column=1, sticky='we', padx=5)
 
         ttk.Label(frame_options, text="배경 불투명도").grid(row=2, column=3, sticky='w', padx=5, pady=(8, 2))
-        self.bg_opacity_scale = ttk.Scale(frame_options, from_=0, to=100, variable=self.bg_opacity, orient='horizontal')
+        self.bg_opacity_scale = ttk.Scale(frame_options, from_=0, to=100, variable=self.bg_opacity, orient='horizontal', command=self.update_opacity_tooltip)
         self.bg_opacity_scale.grid(row=3, column=3, sticky='we', padx=5)
+        self.bg_opacity_tooltip = Tooltip(self.bg_opacity_scale, f"{self.bg_opacity.get()}%", autohide=3000)
 
-        # 3행: 날짜 형식, 단위, _, 배경 크기
+        # 3행: 날짜 형식, 단위, _, 배경 여백
         ttk.Label(frame_options, text="날짜 형식").grid(row=4, column=0, sticky='w', padx=5, pady=(8, 2))
         self.date_format_combo = ttk.Combobox(frame_options, textvariable=self.date_format,
-                     values=["YYYY년 MM월 DD일", "YYYY년 M월 D일", "YYYY-MM-DD", "YYYY. MM. DD.", "YYYY. M. D.", "'YY. MM. DD.", "'YY. M. D.", "M/D/YYYY"])
+                                 values=["YYYY년 MM월 DD일", "YYYY년 M월 D일", "YYYY-MM-DD", "YYYY. MM. DD.", "YYYY. M. D.", "'YY. MM. DD.", "'YY. M. D.", "M/D/YYYY"])
         self.date_format_combo.grid(row=5, column=0, sticky='we', padx=5, pady=(0, 10))
 
         ttk.Label(frame_options, text="단위").grid(row=4, column=1, sticky='w', padx=5, pady=(8, 2))
         self.size_mode_combo = ttk.Combobox(frame_options, textvariable=self.size_mode, values=["픽셀(px)", "백분율(%)"], state='readonly', width=10)
         self.size_mode_combo.grid(row=5, column=1, sticky='we', padx=5, pady=(0, 10))
 
-        ttk.Label(frame_options, text="배경 크기").grid(row=4, column=3, sticky='w', padx=5, pady=(8, 2))
+        ttk.Label(frame_options, text="배경 여백").grid(row=4, column=3, sticky='w', padx=5, pady=(8, 2))
         self.bg_padding_spin = ttk.Spinbox(frame_options, from_=0, to=999, increment=0.1, textvariable=self.bg_padding, width=7)
         self.bg_padding_spin.grid(row=5, column=3, sticky='we', padx=5, pady=(0, 10))
 
@@ -214,7 +230,7 @@ class WatermarkApp:
             self.date_format,
         )
         for v in vars_to_trace:
-            v.trace_add("write", lambda *args: self.render_preview())
+            v.trace_add("write", lambda *args: self.schedule_preview_update())
 
         # 결과 저장 옵션 및 작업 진행률 표시
         frame_save = ttk.Frame(frame_right)
@@ -280,6 +296,11 @@ class WatermarkApp:
     def choose_bg_color(self):
         color = colorchooser.askcolor(title="배경 색 선택")
         if color[1]: self.bg_color.set(color[1])
+
+    def update_opacity_tooltip(self, value):
+        if self.bg_opacity_tooltip:
+            # value는 콜백에서 자동으로 전달되는 float 값이므로 int로 변환
+            self.bg_opacity_tooltip.update_text(f"{int(float(value))}%")
 
     def get_position(self, size, margin, position):
         """
@@ -384,11 +405,10 @@ class WatermarkApp:
             print(f"Preview Error Occured: {e}")
             self.preview_label.config(image="", foreground="#FF6600", text="⚠️ 미리보기 오류:\n\n설정한 값들이 유효하지 않을 수 있습니다.")
 
-    def on_resize(self, event):
-        if self.resize_job_id:  # 이전에 예약된 작업 취소
-            self.root.after_cancel(self.resize_job_id)
-        
-        self.resize_job_id = self.root.after(150, self.render_preview)  # 150ms(0.15초) 후 render_preview 실행하도록 예약
+    def schedule_preview_update(self, *args, delay=100):
+        if self.preview_update_job_id:
+            self.root.after_cancel(self.preview_update_job_id)
+        self.preview_update_job_id = self.root.after(delay, self.render_preview)
 
     def toggle_ui_state(self, is_disabled):
         state = 'disabled' if is_disabled else 'normal'
@@ -420,25 +440,28 @@ class WatermarkApp:
             if not self.files:
                 messagebox.showwarning("경고", "처리할 파일이 없습니다.")
                 return
+            
             if self.save_mode.get() == "overwrite":
+                output_dir = ""
                 if not messagebox.askyesno("확인", "원본 파일을 덮어쓰면 복구할 수 없습니다.\n정말 이대로 진행할까요?"):
                     return
-                
+            else:
+                output_dir = filedialog.askdirectory(title="저장할 폴더 선택")
+                if not output_dir:
+                    messagebox.showinfo("알림", "저장할 경로를 지정하지 않아 작업을 취소했습니다.")
+                    return
+
             self.is_processing = True
             self.toggle_ui_state(is_disabled=True)
             self.apply_button.config(text="⏹️ 작업 중단")
             self.progress_bar['maximum'] = len(self.files)
             self.progress_bar['value'] = 0
 
-            self.processing_thread = threading.Thread(target=self._apply_watermarks_thread, daemon=True)
+            self.processing_thread = threading.Thread(target=self._apply_watermarks_thread, args=(output_dir,), daemon=True)
             self.processing_thread.start()
     
-    def _apply_watermarks_thread(self):        
+    def _apply_watermarks_thread(self, output_dir):        
         save_mode = self.save_mode.get()
-        output_dir = "watermarked"
-        if save_mode == "separate":
-            os.makedirs(output_dir, exist_ok=True)
-        
         success, skipped, failed = 0, 0, 0
 
         for i, file_info in enumerate(self.files):
@@ -459,7 +482,7 @@ class WatermarkApp:
 
                     if save_mode == "overwrite":
                         out_img.save(file_info["path"], **({"exif": exif_bytes} if exif_bytes else {}))
-                    elif save_mode == "separate":
+                    else:
                         base = os.path.basename(file_info["path"])
                         out_img.save(os.path.join(output_dir, base), **({"exif": exif_bytes} if exif_bytes else {}))
                 

@@ -1,9 +1,10 @@
 #.gitignore
 settings.json
-/watermarked
+__pycache__/
 test/
 *.jpg
 *.jpeg
 *.png
 !icon_image_16.png
 !icon_image_128.png
+!screenshot_app_main.png
