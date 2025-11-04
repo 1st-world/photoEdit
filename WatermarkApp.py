@@ -7,7 +7,7 @@ from matplotlib import font_manager
 from datetime import datetime
 from tooltip import Tooltip
 
-APP_VERSION = "v0.25.10.1"
+APP_VERSION = "0.25.11.1"
 CONFIG_FILE = "settings.json"
 ICON_FILE = "icon_image_128.png"
 ICON_FILE_16 = "icon_image_16.png"
@@ -90,17 +90,24 @@ def format_date(date_str: str, fmt: str) -> str:
 class WatermarkApp:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"촬영일 워터마크 삽입기 ({APP_VERSION})")
+        self.root.title(f"촬영일 워터마크 삽입기 (v{APP_VERSION})")
         self.root.iconphoto(True, tk.PhotoImage(file=ICON_FILE), tk.PhotoImage(file=ICON_FILE_16))
         self.settings_file = CONFIG_FILE
+        self.style = ttk.Style(self.root)
 
         # 변수 초기화
-        self.files = []
-        self.selected_index = None
+        self.files = {}
+        self.selected_iid = None
         self.font_map = self.get_font_map()
         self.preview_update_job_id = None
         self.is_processing = False
         self.processing_thread = None
+
+        # 탭 관련 변수 초기화
+        self.tab_buttons = {}
+        self.current_frame = None
+        self.watermark_frame = None
+        self.coming_soon_frame = None
 
         # Tk 변수 초기화
         self.font_name = tk.StringVar(value=list(self.font_map.keys())[0])
@@ -116,12 +123,199 @@ class WatermarkApp:
         self.save_mode = tk.StringVar(value="separate")
 
         self.load_settings()
+        self.configure_styles()
         self.create_widgets()
+        self.switch_tab("watermark")
+        self.root.bind_all("<Button-1>", self._on_global_mouse_press)
+
+
+    def _on_global_mouse_press(self, event):
+        """
+        앱 전역에서 마우스 클릭을 감지하여, 포커스가 필요 없는 위젯에서 포커스를 제거합니다.
+        """
+        try:
+            widget = event.widget
+            widget_class = widget.winfo_class()
+
+            # 마우스 클릭 시 포커스를 받지 않을 위젯 목록 (키보드 조작 시에는 포커스를 받음)
+            widgets_to_defocus = {
+                "TButton",
+                "TRadiobutton",
+                "TScale"
+            }
+            if widget_class in widgets_to_defocus:
+                # 위젯의 command가 정상적으로 실행되도록 아주 잠깐(1ms) 후에 포커스를 중립 프레임으로 이동
+                self.root.after(1, lambda: self.main_content_frame.focus_set())
+        except (tk.TclError, AttributeError):
+            # TclError: 위젯이 파괴된 후 클릭하는 경우 등.
+            # AttributeError: TCombobox 팝업 등에서 event.widget이 객체가 아닌 문자열(str)을 반환하는 경우 등.
+            pass
+
+
+    def configure_styles(self):
+        # 색상 정의
+        self.TAB_BAR_COLOR = "#3E3E3E"
+        self.INACTIVE_TAB_FG = "#A0A0A0"
+        self.ACTIVE_TAB_FG = "#000000"
+        try:
+            self.ACTIVE_TAB_BG = self.style.lookup('TFrame', 'background')
+        except tk.TclError:
+            self.ACTIVE_TAB_BG = "#F0F0F0"
+
+        # 기본 폰트 정보 조회
+        default_font_obj = font.nametofont("TkDefaultFont")
+        self.default_font_family = default_font_obj.actual("family")
+        self.default_font_size = default_font_obj.actual("size")
+
+        # 탭 바 프레임 스타일
+        self.style.configure("TabBar.TFrame", 
+                             background=self.TAB_BAR_COLOR)
+
+        # 탭 버튼 스타일
+        self.style.configure("Tab.TButton",
+                             background=self.TAB_BAR_COLOR,
+                             foreground=self.INACTIVE_TAB_FG,
+                             bordercolor=self.TAB_BAR_COLOR,
+                             relief='flat',
+                             padding=(12, 6))
+        self.style.map("Tab.TButton",
+            foreground=[
+                ('disabled', self.ACTIVE_TAB_FG),
+                ('pressed', self.ACTIVE_TAB_FG),
+                ('active', self.ACTIVE_TAB_FG)
+            ]
+        )
+
+        # 설정 버튼 스타일
+        self.style.configure("Settings.TButton",
+                             background=self.TAB_BAR_COLOR,
+                             bordercolor=self.TAB_BAR_COLOR,
+                             relief='flat',
+                             padding=(12, 6))
+        self.style.map("Settings.TButton",
+            relief=[
+                ('active', 'flat'),
+                ('pressed', 'flat')
+            ]
+        )
+
+        # 메인 콘텐츠 프레임 스타일
+        self.style.configure("Main.TFrame", background=self.ACTIVE_TAB_BG, focuscolor=self.ACTIVE_TAB_BG)
 
 
     def create_widgets(self):
+        self.frame_tab_bar = ttk.Frame(self.root, style="TabBar.TFrame")
+        self.frame_tab_bar.pack(side='top', fill='x')
+
+        frame_tabs = ttk.Frame(self.frame_tab_bar, style="TabBar.TFrame")
+        frame_tabs.pack(side='left', padx=10, pady=5)
+
+        # 탭 버튼 생성 및 저장
+        self.tab_buttons["watermark"] = ttk.Button(frame_tabs, text="워터마크", style="Tab.TButton",
+                                                   command=lambda: self.switch_tab("watermark"))
+        self.tab_buttons["watermark"].pack(side='left')
+
+        self.tab_buttons["feature2"] = ttk.Button(frame_tabs, text="자르기 (예정)", style="Tab.TButton",
+                                                  command=lambda: self.switch_tab("feature2"))
+        self.tab_buttons["feature2"].pack(side='left')
+
+        self.tab_buttons["feature3"] = ttk.Button(frame_tabs, text="필터 (예정)", style="Tab.TButton",
+                                                  command=lambda: self.switch_tab("feature3"))
+        self.tab_buttons["feature3"].pack(side='left')
+
+        self.tab_buttons["feature4"] = ttk.Button(frame_tabs, text="배경 제거 (예정)", style="Tab.TButton",
+                                                  command=lambda: self.switch_tab("feature4"))
+        self.tab_buttons["feature4"].pack(side='left')
+
+        # 설정 버튼
+        self.settings_btn = ttk.Button(self.frame_tab_bar, text="⚙️ 설정", style="Settings.TButton", command=self.open_settings)
+        self.settings_btn.pack(side='right', padx=10, pady=5)
+
+        # 메인 콘텐츠 프레임
+        self.main_content_frame = ttk.Frame(self.root, style="Main.TFrame", takefocus=True)
+        self.main_content_frame.pack(side='top', fill='both', expand=True)
+
+        # 1) 워터마크 프레임 로드
+        self.watermark_frame = ttk.Frame(self.main_content_frame)   # pack()은 switch_tab()에서 호출
+        self.create_watermark_ui()
+
+        # 2) "추후 예정" 프레임 로드
+        self.coming_soon_frame = ttk.Frame(self.main_content_frame) # pack()은 switch_tab()에서 호출
+        self.coming_soon_label = ttk.Label(self.coming_soon_frame,
+                                           text=f"🚧 해당 기능은 추후 업데이트 예정입니다. 🚧\n\n최신 정보는 GitHub 페이지를 참고해 주세요.\n\n{GITHUB_URL}",
+                                           font=font.Font(family=self.default_font_family, weight='bold'), anchor='center', justify='center')
+        self.coming_soon_label.pack(fill='both', expand=True, padx=50, pady=50)
+
+        # 모든 콘텐츠 프레임 목록
+        all_content_frames = [self.watermark_frame, self.coming_soon_frame]
+
+        self.root.update_idletasks()
+
+        # 탭 바 높이 계산 (패딩 포함)
+        pady_config = self.frame_tab_bar.pack_info().get('pady', 0)
+        pady_top, pady_bottom = 0, 0
+        if isinstance(pady_config, (tuple, list)) and len(pady_config) == 2:
+            pady_top = int(pady_config[0])
+            pady_bottom = int(pady_config[1])
+        elif pady_config:
+            pady_top = int(pady_config)
+            pady_bottom = int(pady_config)
+        tab_bar_height = self.frame_tab_bar.winfo_reqheight() + pady_top + pady_bottom
+
+        # 모든 콘텐츠 프레임 중 최대 너비, 높이 계산
+        max_w, max_h = 0, 0
+        for frame in all_content_frames:
+            max_w = max(max_w, frame.winfo_reqwidth())
+            max_h = max(max_h, frame.winfo_reqheight())
+
+        # 루트 창 최소 크기 설정
+        self.root.minsize(max_w, max_h + tab_bar_height)
+
+
+    def switch_tab(self, tab_name):
+        if self.current_frame:
+            self.current_frame.pack_forget()
+
+        for name, btn in self.tab_buttons.items():
+            if name == tab_name:
+                btn.config(state='disabled')
+            else:
+                btn.config(state='normal')
+
+        if tab_name == "watermark":
+            self.watermark_frame.pack(fill='both', expand=True)
+            self.current_frame = self.watermark_frame
+        else:   # "추후 예정" 탭 처리
+            self.coming_soon_frame.pack(fill='both', expand=True)
+            self.current_frame = self.coming_soon_frame
+
+
+    def open_settings(self):
+        settings_win = tk.Toplevel(self.root)
+        settings_win.title("환경 설정")
+        settings_win.transient(self.root)
+        settings_win.grab_set()
+        settings_win.focus_set()
+
+        # 창 크기 및 위치(중앙 배치) 설정
+        win_w, win_h = 400, 300
+        new_x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (win_w // 2)
+        new_y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (win_h // 2)
+        settings_win.geometry(f"{win_w}x{win_h}+{new_x}+{new_y}")
+
+        ttk.Label(settings_win, text=f"환경 설정은 추후 업데이트 예정입니다.\n\n현재 앱 버전: {APP_VERSION}",
+                  font=font.Font(family=self.default_font_family, weight='bold'), anchor='center', justify='center').pack(fill='both', expand=True, padx=20, pady=20)
+
+        def on_settings_close():
+            settings_win.grab_release()
+            settings_win.destroy()
+
+        settings_win.protocol("WM_DELETE_WINDOW", on_settings_close)
+
+
+    def create_watermark_ui(self):
         # 좌측 프레임
-        frame_left = ttk.Frame(self.root)
+        frame_left = ttk.Frame(self.watermark_frame)
         frame_left.pack(side='left', fill='y', padx=15, pady=15)
 
         frame_tree_btns = ttk.Frame(frame_left)
@@ -133,7 +327,7 @@ class WatermarkApp:
 
         self.tree_scrollbar = ttk.Scrollbar(frame_left)
         self.tree_scrollbar.pack(side='right', fill='y')
-        self.tree = ttk.Treeview(frame_left, columns=("filename", "date"), show='headings', height=30, yscrollcommand=self.tree_scrollbar.set)
+        self.tree = ttk.Treeview(frame_left, columns=("filename", "date"), show='headings', height=25, yscrollcommand=self.tree_scrollbar.set)
         self.tree.heading("filename", text="파일명")
         self.tree.heading("date", text="촬영일")
         self.tree.column("filename", anchor='w')
@@ -143,7 +337,7 @@ class WatermarkApp:
         self.tree_scrollbar.config(command=self.tree.yview)
 
         # 우측 프레임
-        frame_right = ttk.Frame(self.root)
+        frame_right = ttk.Frame(self.watermark_frame)
         frame_right.pack(side='right', fill='both', expand=True, padx=(5, 15), pady=15)
 
         # 미리보기 프레임
@@ -257,36 +451,39 @@ class WatermarkApp:
         file_paths = filedialog.askopenfilenames(filetypes=[("이미지 파일", "*.jpg;*.jpeg;*.png")])
         for path in file_paths:
             date_str = get_exif_date(path)
-            self.files.append({"path": path, "date_str": date_str, "rotation": 0})
-            self.tree.insert('', 'end', values=(os.path.basename(path), date_str if date_str else "❌"))
+            # Treeview에 항목을 추가하고, 고유한 IID를 반환받음
+            iid = self.tree.insert('', 'end', values=(os.path.basename(path), date_str if date_str else "❌"))
+            self.files[iid] = {"path": path, "date_str": date_str, "rotation": 0}
 
     def remove_file(self):
-        selected = self.tree.selection()
-        for item in selected:
-            idx = self.tree.index(item)
-            self.tree.delete(item)
-            self.files.pop(idx)
-            self.selected_index = None
-            self.preview_label.config(image="", foreground="", text="선택한 파일 없음")
-            self.date_entry.delete(0, 'end')
+        selected_iids = self.tree.selection()
+        for iid in selected_iids:
+            self.tree.delete(iid)
+            if iid in self.files:
+                self.files.pop(iid)
+            if self.selected_iid == iid:
+                self.selected_iid = None
+                self.preview_label.config(image="", foreground="", text="선택한 파일 없음")
+                self.date_entry.delete(0, 'end')
 
     def on_file_select(self, event):
-        selected = self.tree.selection()
-        if not selected: return
-        self.selected_index = self.tree.index(selected[-1]) # Treeview 중복 선택 시 마지막 선택 항목만 처리
-        file_info = self.files[self.selected_index]
-        self.date_entry.delete(0, 'end')
-        self.date_entry.insert(0, file_info["date_str"])
-        self.render_preview()
+        selected_iids = self.tree.selection()
+        if not selected_iids: return
+        self.selected_iid = selected_iids[-1] # Treeview 중복 선택 시 마지막 선택 항목만 처리
+        file_info = self.files.get(self.selected_iid)
+        if file_info:
+            self.date_entry.delete(0, 'end')
+            self.date_entry.insert(0, file_info["date_str"])
+            self.render_preview()
 
     def commit_date(self, *args):
-        if self.selected_index is not None:
-            self.files[self.selected_index]["date_str"] = self.date_entry.get().strip()
+        if self.selected_iid is not None:
+            self.files[self.selected_iid]["date_str"] = self.date_entry.get().strip()
             self.render_preview()
 
     def rotate_image(self):
-        if self.selected_index is not None:
-            self.files[self.selected_index]["rotation"] = (self.files[self.selected_index]["rotation"] + 90) % 360
+        if self.selected_iid is not None:
+            self.files[self.selected_iid]["rotation"] = (self.files[self.selected_iid]["rotation"] + 90) % 360
             self.render_preview()
 
     def choose_font_color(self):
@@ -386,8 +583,8 @@ class WatermarkApp:
         return Image.alpha_composite(img.convert("RGBA"), txt_layer)
 
     def render_preview(self):
-        if self.selected_index is None: return
-        file_info = self.files[self.selected_index]
+        if self.selected_iid is None: return
+        file_info = self.files[self.selected_iid]
         try:
             with Image.open(file_info["path"]) as img:
                 img = ImageOps.exif_transpose(img)
@@ -459,7 +656,7 @@ class WatermarkApp:
 
             self.processing_thread = threading.Thread(target=self._apply_watermarks_thread, args=(output_dir,), daemon=True)
             self.processing_thread.start()
-    
+
     def _apply_watermarks_thread(self, output_dir):        
         save_mode = self.save_mode.get()
         success, skipped, failed = 0, 0, 0
@@ -490,12 +687,14 @@ class WatermarkApp:
             except Exception as e:
                 failed += 1
                 print(f"Apply Error Occured: {e}")
-                messagebox.showerror("오류 발생", f"{file_info['path']}\n\n{e}")
+                self.root.after(0, lambda path=file_info["path"], err=e:
+                    messagebox.showerror("오류 발생", f"{path}\n\n{err}")
+                )
             
             self.root.after(0, self.progress_bar.config, {'value': i + 1})
 
         self.root.after(0, self.on_process_finished, success, skipped, failed)
-        
+
     def on_process_finished(self, success, skipped, failed):
         self.is_processing = False
         self.toggle_ui_state(is_disabled=False)
