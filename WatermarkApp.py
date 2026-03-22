@@ -7,7 +7,7 @@ from matplotlib import font_manager
 from datetime import datetime
 from tooltip import Tooltip
 
-APP_VERSION = "0.25.11.1"
+APP_VERSION = "0.25.11.2"
 CONFIG_FILE = "settings.json"
 ICON_FILE = "icon_image_128.png"
 ICON_FILE_16 = "icon_image_16.png"
@@ -661,7 +661,7 @@ class WatermarkApp:
         save_mode = self.save_mode.get()
         success, skipped, failed = 0, 0, 0
 
-        for i, file_info in enumerate(self.files):
+        for i, file_info in enumerate(self.files.values()):
             if not self.is_processing: break
             try:
                 if not file_info["date_str"]:
