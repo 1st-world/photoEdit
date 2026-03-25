@@ -1,90 +1,18 @@
-# pip install Pillow matplotlib
 import os, json, threading
 import tkinter as tk
 from tkinter import ttk, filedialog, colorchooser, messagebox, font
-from PIL import Image, ImageOps, ImageTk, ImageDraw, ImageFont, ExifTags
-from matplotlib import font_manager
-from datetime import datetime
+from PIL import Image, ImageOps, ImageTk
 from tooltip import Tooltip
+from core.fonts import FontRegistry
+from core.models import WatermarkConfig, ImageListManager
+from core.metadata import get_exif_date
+from core.watermark import draw_watermark
 
-APP_VERSION = "0.25.11.2"
+APP_VERSION = "0.26.3.1"
 CONFIG_FILE = "settings.json"
 ICON_FILE = "icon_image_128.png"
 ICON_FILE_16 = "icon_image_16.png"
 GITHUB_URL = "https://github.com/1st-world/photoEdit"
-
-
-def hex_to_rgba(hex_color: str, alpha_percent: float):
-    """Hex 색상 코드를 RGBA 튜플로 변환합니다."""
-    hex_color = hex_color.lstrip('#')
-    r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-    alpha = int(255 * (alpha_percent / 100.0))
-    return (r, g, b, alpha)
-
-def get_exif_date(path: str) -> str:
-    """
-    사진 파일의 EXIF 데이터 중 DateTimeOriginal, DateTimeDigitized, DateTime 값을 통해 촬영일을 추출합니다.\n
-    "YYYY-MM-DD" 형식으로 반환하며, 해당 데이터가 없거나 예외가 발생하면 빈 문자열을 반환합니다.
-    """
-    try:
-        with Image.open(path) as img:
-            exif_data = img.getexif()
-            if exif_data:
-                tag_ids = {name: tid for tid, name in ExifTags.TAGS.items()}
-
-                # 우선순위에 따라 탐색할 태그 ID 목록 준비 (태그 이름, IFD 종류)
-                tag_priority = [
-                    ('DateTimeOriginal', 1),   # EXIF IFD: 1
-                    ('DateTimeDigitized', 1),  # EXIF IFD: 1
-                    ('DateTime', 0)            # Main IFD: 0
-                ]
-
-                exif_ifd_pointer_id = tag_ids.get('ExifOffset')
-                exif_ifd = {}
-                if exif_ifd_pointer_id in exif_data:
-                    exif_ifd = exif_data.get_ifd(exif_ifd_pointer_id)
-
-                for tag_name, ifd_type in tag_priority:
-                    tag_id = tag_ids.get(tag_name)
-                    if not tag_id: continue
-
-                    ifd_to_search = exif_data if ifd_type == 0 else exif_ifd
-                    date_str = ifd_to_search.get(tag_id)
-                    
-                    if date_str:
-                        date_part = date_str.split(" ")[0]
-                        return date_part.replace(":", "-")
-    except Exception:
-        pass
-    return ""
-
-def format_date(date_str: str, fmt: str) -> str:
-    """
-    날짜 문자열의 형식을 변환합니다.
-    Args:
-        `date_str` (str): 변환할 날짜 문자열 (예: "1999-01-31").
-        `fmt` (str): 목표 형식 문자열 (예: "YYYY년 MM월 DD일").
-    Returns:
-        str: 변환된 날짜 문자열.
-    Raises:
-        ValueError: 인자의 날짜 형식이 올바르지 않거나 존재하지 않는 경우.
-        TypeError: `date_str` 인자가 문자열 타입이 아닌 경우 등.
-        AttributeError: `fmt` 인자가 문자열 타입이 아닌 경우 등.
-    """
-    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-    # 사용자 지정 입력 코드를 표준 형식 코드로 매핑
-    fmt_map = {
-        "YYYY": "%Y", "YY": "%y",   # 연도 (예: 1999 또는 99)
-        "MM": "%m", "M": "%#m" if os.name == 'nt' else "%-m",   # 월 (예: 01 또는 1)
-        "DD": "%d", "D": "%#d" if os.name == 'nt' else "%-d",   # 일 (예: 01 또는 1)
-        "AA": "%A", "A": "%a",      # 요일 (예: Thursday 또는 Thu)
-    }
-    output_fmt = fmt.upper()
-    # 매핑 테이블을 사용하여 형식 코드 치환, 더 긴 형식 코드부터 (예: YYYY가 YY보다 먼저)
-    for key in sorted(fmt_map.keys(), key=len, reverse=True):
-        output_fmt = output_fmt.replace(key, fmt_map[key])
-
-    return date_obj.strftime(output_fmt)
 
 
 class WatermarkApp:
@@ -95,10 +23,11 @@ class WatermarkApp:
         self.settings_file = CONFIG_FILE
         self.style = ttk.Style(self.root)
 
+        self.font_registry = FontRegistry()
+        self.list_manager = ImageListManager()
+
         # 변수 초기화
-        self.files = {}
         self.selected_iid = None
-        self.font_map = self.get_font_map()
         self.preview_update_job_id = None
         self.is_processing = False
         self.processing_thread = None
@@ -110,7 +39,9 @@ class WatermarkApp:
         self.coming_soon_frame = None
 
         # Tk 변수 초기화
-        self.font_name = tk.StringVar(value=list(self.font_map.keys())[0])
+        available_fonts = self.font_registry.get_available_font_names()
+        default_font = available_fonts[0] if available_fonts else ""
+        self.font_name = tk.StringVar(value=default_font)
         self.font_size = tk.DoubleVar(value=3)
         self.font_color = tk.StringVar(value="#000000")
         self.bg_color = tk.StringVar(value="#FFFFFF")
@@ -129,15 +60,30 @@ class WatermarkApp:
         self.root.bind_all("<Button-1>", self._on_global_mouse_press)
 
 
+    def get_current_config(self) -> WatermarkConfig:
+        """UI의 Tk 변수들을 모아 WatermarkConfig 데이터 모델 객체로 반환합니다."""
+        return WatermarkConfig(
+            font_name=self.font_name.get() or None,
+            font_size=self.font_size.get(),
+            font_color=self.font_color.get(),
+            bg_color=self.bg_color.get(),
+            bg_opacity=self.bg_opacity.get(),
+            bg_padding=self.bg_padding.get(),
+            position=self.position.get(),
+            margin=self.margin.get(),
+            size_mode=self.size_mode.get(),
+            date_format=self.date_format.get(),
+            save_mode=self.save_mode.get()
+        )
+
+
     def _on_global_mouse_press(self, event):
-        """
-        앱 전역에서 마우스 클릭을 감지하여, 포커스가 필요 없는 위젯에서 포커스를 제거합니다.
-        """
+        """앱 전역에서 마우스 클릭을 감지하여, 포커스가 필요 없는 위젯에서 포커스를 제거합니다."""
         try:
             widget = event.widget
             widget_class = widget.winfo_class()
 
-            # 마우스 클릭 시 포커스를 받지 않을 위젯 목록 (키보드 조작 시에는 포커스를 받음)
+            # 마우스 클릭 시 포커스를 받지 않을 위젯 목록 (키보드 조작은 해당 없음)
             widgets_to_defocus = {
                 "TButton",
                 "TRadiobutton",
@@ -165,7 +111,6 @@ class WatermarkApp:
         # 기본 폰트 정보 조회
         default_font_obj = font.nametofont("TkDefaultFont")
         self.default_font_family = default_font_obj.actual("family")
-        self.default_font_size = default_font_obj.actual("size")
 
         # 탭 바 프레임 스타일
         self.style.configure("TabBar.TFrame", 
@@ -277,10 +222,7 @@ class WatermarkApp:
             self.current_frame.pack_forget()
 
         for name, btn in self.tab_buttons.items():
-            if name == tab_name:
-                btn.config(state='disabled')
-            else:
-                btn.config(state='normal')
+            btn.config(state='disabled' if name == tab_name else 'normal')
 
         if tab_name == "watermark":
             self.watermark_frame.pack(fill='both', expand=True)
@@ -367,7 +309,8 @@ class WatermarkApp:
 
         # 1행: 글꼴, 크기, 글자 색, 배경 색
         ttk.Label(frame_options, text="글꼴").grid(row=0, column=0, sticky='w', padx=5, pady=2)
-        self.font_name_combo = ttk.Combobox(frame_options, textvariable=self.font_name, values=list(self.font_map.keys()), state='readonly')
+        font_list = self.font_registry.get_available_font_names()
+        self.font_name_combo = ttk.Combobox(frame_options, textvariable=self.font_name, values=font_list, state='readonly')
         self.font_name_combo.grid(row=1, column=0, sticky='we', padx=5)
 
         ttk.Label(frame_options, text="크기").grid(row=0, column=1, sticky='w', padx=5, pady=2)
@@ -451,16 +394,15 @@ class WatermarkApp:
         file_paths = filedialog.askopenfilenames(filetypes=[("이미지 파일", "*.jpg;*.jpeg;*.png")])
         for path in file_paths:
             date_str = get_exif_date(path)
-            # Treeview에 항목을 추가하고, 고유한 IID를 반환받음
-            iid = self.tree.insert('', 'end', values=(os.path.basename(path), date_str if date_str else "❌"))
-            self.files[iid] = {"path": path, "date_str": date_str, "rotation": 0}
+            item = self.list_manager.add_image(path, date_str if date_str else "")
+            if not self.tree.exists(item.id):
+                self.tree.insert('', 'end', iid=item.id, values=(os.path.basename(path), date_str if date_str else "❌"))
 
     def remove_file(self):
         selected_iids = self.tree.selection()
         for iid in selected_iids:
             self.tree.delete(iid)
-            if iid in self.files:
-                self.files.pop(iid)
+            self.list_manager.remove_image(iid)
             if self.selected_iid == iid:
                 self.selected_iid = None
                 self.preview_label.config(image="", foreground="", text="선택한 파일 없음")
@@ -470,21 +412,24 @@ class WatermarkApp:
         selected_iids = self.tree.selection()
         if not selected_iids: return
         self.selected_iid = selected_iids[-1] # Treeview 중복 선택 시 마지막 선택 항목만 처리
-        file_info = self.files.get(self.selected_iid)
-        if file_info:
+        
+        item = self.list_manager.get_item(self.selected_iid)
+        if item:
             self.date_entry.delete(0, 'end')
-            self.date_entry.insert(0, file_info["date_str"])
+            self.date_entry.insert(0, item.date_str)
             self.render_preview()
 
     def commit_date(self, *args):
         if self.selected_iid is not None:
-            self.files[self.selected_iid]["date_str"] = self.date_entry.get().strip()
-            self.render_preview()
+            new_date = self.date_entry.get().strip()
+            if self.list_manager.update_date(self.selected_iid, new_date):
+                self.tree.set(self.selected_iid, "date", new_date if new_date else "❌")
+                self.render_preview()
 
     def rotate_image(self):
         if self.selected_iid is not None:
-            self.files[self.selected_iid]["rotation"] = (self.files[self.selected_iid]["rotation"] + 90) % 360
-            self.render_preview()
+            if self.list_manager.update_rotation(self.selected_iid, 90):
+                self.render_preview()
 
     def choose_font_color(self):
         color = colorchooser.askcolor(title="글자 색 선택")  # color[0]: RGB 값 / color[1]: 16진수 str
@@ -495,105 +440,26 @@ class WatermarkApp:
         if color[1]: self.bg_color.set(color[1])
 
     def update_opacity_tooltip(self, value):
-        if self.bg_opacity_tooltip:
+        if hasattr(self, 'bg_opacity_tooltip') and self.bg_opacity_tooltip:
             # value는 콜백에서 자동으로 전달되는 float 값이므로 int로 변환
             self.bg_opacity_tooltip.update_text(f"{int(float(value))}%")
 
-    def get_position(self, size, margin, position):
-        """
-        이미지 크기와 여백을 기반으로 텍스트 위치와 앵커를 반환합니다.
-        Args:
-            `size` (tuple): 이미지 크기 (width, height)
-            `margin` (float): 여백 크기 (px)
-            `position` (str): 위치 문자열 (좌측 상단/우측 상단/좌측 하단/우측 하단/중앙)
-        Returns:
-            (x, y), anchor (tuple): 위치 좌표와 앵커 문자열
-        """
-        W, H = size
-        pos_map = {
-            "좌측 상단": ((margin, margin), "lt"),          # left-top (anchor 값)
-            "우측 상단": ((W - margin, margin), "rt"),      # right-top
-            "좌측 하단": ((margin, H - margin), "lb"),      # left-bottom
-            "우측 하단": ((W - margin, H - margin), "rb"),  # right-bottom
-            "중앙": ((W // 2, H // 2), "mm"),
-        }
-        result = pos_map.get(position)
-        if result is None:
-            print(f"Unknown position: '{position}'. Falling back to default position.")
-            result = ((W - margin, H - margin), "rb")
-        return result
-
-    def get_font_map(self):
-        fonts = font_manager.findSystemFonts(fontpaths=None, fontext='ttf')
-        font_map = {}
-        for font_path in fonts:
-            try:
-                name, style = ImageFont.truetype(font_path).getname()
-                font_display_name = name if style.lower() in ["regular", "normal"] or name.endswith(style) else f"{name} {style}"
-                if font_display_name not in font_map:   # 이름 중복 시 첫 번째만 사용
-                    font_map[font_display_name] = font_path
-            except Exception:
-                continue
-        return dict(sorted(font_map.items()))
-
-    def _draw_watermark(self, img, date_str):
-        try:
-            date_text = format_date(date_str, self.date_format.get())
-        except (ValueError, TypeError, AttributeError):
-            return img.convert("RGBA")  # 날짜 없으면 원본 이미지 반환
-
-        # 텍스트 레이어 생성
-        txt_layer = Image.new("RGBA", img.size, (255, 255, 255, 0))
-        draw = ImageDraw.Draw(txt_layer)
-
-        # 텍스트 및 여백 크기 로드
-        base_size = max(img.width, img.height)
-        if self.size_mode.get() == "픽셀(px)":
-            font_px = self.font_size.get()
-            margin_px = self.margin.get()
-            padding_px = self.bg_padding.get()
-        elif self.size_mode.get() == "백분율(%)":
-            font_px = base_size * (self.font_size.get() / 100.0)
-            margin_px = base_size * (self.margin.get() / 100.0)
-            padding_px = base_size * (self.bg_padding.get() / 100.0)
-
-        # 텍스트 스타일 로드
-        try:
-            font_path = self.font_map.get(self.font_name.get())
-            font = ImageFont.truetype(font_path, font_px)
-        except Exception as e:
-            print(f"Font loading failed: {e}. Falling back to default font.")
-            font = ImageFont.load_default(font_px)
-
-        # 위치 계산
-        pos, anchor = self.get_position(img.size, margin_px, self.position.get())
-        bbox = draw.textbbox(pos, date_text, font=font, anchor=anchor)
-        
-        # 텍스트 배경 적용
-        bg_color_hex = self.bg_color.get()
-        if bg_color_hex:
-            bg_box = (bbox[0] - padding_px, bbox[1] - padding_px, bbox[2] + padding_px, bbox[3] + padding_px)
-            rgba_fill = hex_to_rgba(bg_color_hex, self.bg_opacity.get())
-            draw.rectangle(bg_box, fill=rgba_fill)
-
-        # 텍스트 적용
-        draw.text(pos, date_text, font=font, fill=self.font_color.get(), anchor=anchor)
-
-        # 원본 이미지, 텍스트 레이어 합성
-        return Image.alpha_composite(img.convert("RGBA"), txt_layer)
 
     def render_preview(self):
         if self.selected_iid is None: return
-        file_info = self.files[self.selected_iid]
+        item = self.list_manager.get_item(self.selected_iid)
+        if not item: return
+        config = self.get_current_config()
+        font_path = self.font_registry.get_font_path(config.font_name)
         try:
-            with Image.open(file_info["path"]) as img:
+            with Image.open(item.path) as img:
                 img = ImageOps.exif_transpose(img)
-                if file_info.get("rotation", 0) != 0:
-                    img = img.rotate(file_info["rotation"], expand=True)
+                if item.rotation != 0:
+                    img = img.rotate(item.rotation, expand=True)
 
-                watermarked_img = self._draw_watermark(img, file_info["date_str"])
+                watermarked_img = draw_watermark(img, item.date_str, font_path, config)
                 preview_img = watermarked_img.convert("RGB")
-                width, height = self.preview_label.winfo_width(), self.preview_label.winfo_height() # 이미지 크기 동적 조절
+                width, height = self.preview_label.winfo_width(), self.preview_label.winfo_height()
                 preview_img.thumbnail((width, height))
 
                 self.preview_img = ImageTk.PhotoImage(preview_img)
@@ -605,13 +471,15 @@ class WatermarkApp:
     def schedule_preview_update(self, *args, delay=100):
         if self.preview_update_job_id:
             self.root.after_cancel(self.preview_update_job_id)
-        self.preview_update_job_id = self.root.after(delay, self.render_preview)
+        self.preview_update_job_id = self.root.after(delay, self._run_scheduled_preview)
+
+    def _run_scheduled_preview(self):
+        self.preview_update_job_id = None
+        self.render_preview()
 
     def toggle_ui_state(self, is_disabled):
         state = 'disabled' if is_disabled else 'normal'
         readonly_state = 'disabled' if is_disabled else 'readonly'
-        
-        # 제어할 위젯 목록
         widgets_to_control = [
             self.add_btn, self.remove_btn, self.tree, self.date_entry, self.rotate_btn,
             self.font_name_combo, self.font_size_spin, self.font_color_btn, self.bg_color_btn,
@@ -619,7 +487,6 @@ class WatermarkApp:
             self.date_format_combo, self.size_mode_combo, self.bg_padding_spin,
             self.save_mode_radio_ow, self.save_mode_radio_sep
         ]
-
         for widget in widgets_to_control:
             try:
                 if isinstance(widget, (ttk.Combobox)) and (widget != self.date_format_combo):
@@ -634,10 +501,10 @@ class WatermarkApp:
             self.is_processing = False
             self.apply_button.config(text="중단 중...", state='disabled')
         else:
-            if not self.files:
+            if len(self.list_manager) == 0:
                 messagebox.showwarning("경고", "처리할 파일이 없습니다.")
                 return
-            
+
             if self.save_mode.get() == "overwrite":
                 output_dir = ""
                 if not messagebox.askyesno("확인", "원본 파일을 덮어쓰면 복구할 수 없습니다.\n정말 이대로 진행할까요?"):
@@ -651,48 +518,50 @@ class WatermarkApp:
             self.is_processing = True
             self.toggle_ui_state(is_disabled=True)
             self.apply_button.config(text="⏹️ 작업 중단")
-            self.progress_bar['maximum'] = len(self.files)
+
+            # 스레드로 넘길 데이터(스냅샷) 캡처
+            items_snapshot = self.list_manager.get_all_items()
+            config_snapshot = self.get_current_config()
+            font_path_snapshot = self.font_registry.get_font_path(config_snapshot.font_name)
+            save_mode_snapshot = self.save_mode.get()
+
+            self.progress_bar['maximum'] = len(items_snapshot)
             self.progress_bar['value'] = 0
 
-            self.processing_thread = threading.Thread(target=self._apply_watermarks_thread, args=(output_dir,), daemon=True)
+            self.processing_thread = threading.Thread(target=self._apply_watermarks_thread, args=(output_dir, items_snapshot, config_snapshot, font_path_snapshot, save_mode_snapshot), daemon=True)
             self.processing_thread.start()
 
-    def _apply_watermarks_thread(self, output_dir):        
-        save_mode = self.save_mode.get()
+    def _apply_watermarks_thread(self, output_dir, items, config, font_path, save_mode):
         success, skipped, failed = 0, 0, 0
 
-        for i, file_info in enumerate(self.files.values()):
+        for i, item in enumerate(items):
             if not self.is_processing: break
             try:
-                if not file_info["date_str"]:
+                if not item.date_str:
                     skipped += 1
                     continue
-                with Image.open(file_info["path"]) as img:
+                with Image.open(item.path) as img:
                     img = ImageOps.exif_transpose(img)
                     exif_bytes = img.info.get("exif")   # Orientation 값을 제외한 EXIF 데이터 보존
 
-                    if file_info.get("rotation", 0) != 0:
-                        img = img.rotate(file_info["rotation"], expand=True)
+                    if item.rotation != 0:
+                        img = img.rotate(item.rotation, expand=True)
 
-                    watermarked_img = self._draw_watermark(img, file_info["date_str"])
+                    watermarked_img = draw_watermark(img, item.date_str, font_path, config)
                     out_img = watermarked_img.convert("RGB")
 
                     if save_mode == "overwrite":
-                        out_img.save(file_info["path"], **({"exif": exif_bytes} if exif_bytes else {}))
+                        out_img.save(item.path, **({"exif": exif_bytes} if exif_bytes else {}))
                     else:
-                        base = os.path.basename(file_info["path"])
+                        base = os.path.basename(item.path)
                         out_img.save(os.path.join(output_dir, base), **({"exif": exif_bytes} if exif_bytes else {}))
-                
                 success += 1
             except Exception as e:
                 failed += 1
-                print(f"Apply Error Occured: {e}")
-                self.root.after(0, lambda path=file_info["path"], err=e:
+                self.root.after(0, lambda path=item.path, err=e:
                     messagebox.showerror("오류 발생", f"{path}\n\n{err}")
                 )
-            
             self.root.after(0, self.progress_bar.config, {'value': i + 1})
-
         self.root.after(0, self.on_process_finished, success, skipped, failed)
 
     def on_process_finished(self, success, skipped, failed):
@@ -708,36 +577,27 @@ class WatermarkApp:
             try:
                 with open(self.settings_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.font_name.set(data.get("font_name", list(self.font_map.keys())[0]))
-                self.font_size.set(data.get("font_size", 3))
-                self.font_color.set(data.get("font_color", "#000000"))
-                self.bg_color.set(data.get("bg_color", "#FFFFFF"))
-                self.bg_opacity.set(data.get("bg_opacity", 50))
-                self.bg_padding.set(data.get("bg_padding", 1))
-                self.position.set(data.get("position", "우측 하단"))
-                self.margin.set(data.get("margin", 3))
-                self.size_mode.set(data.get("size_mode", "백분율(%)"))
-                self.date_format.set(data.get("date_format", "YYYY-MM-DD"))
-                self.save_mode.set(data.get("save_mode", "separate"))
+                config = WatermarkConfig.from_dict(data)
+                available_fonts = self.font_registry.get_available_font_names()
+                valid_font = config.font_name if config.font_name in available_fonts else (available_fonts[0] if available_fonts else "")
+                self.font_name.set(valid_font)
+                self.font_size.set(config.font_size)
+                self.font_color.set(config.font_color)
+                self.bg_color.set(config.bg_color)
+                self.bg_opacity.set(config.bg_opacity)
+                self.bg_padding.set(config.bg_padding)
+                self.position.set(config.position)
+                self.margin.set(config.margin)
+                self.size_mode.set(config.size_mode)
+                self.date_format.set(config.date_format)
+                self.save_mode.set(config.save_mode)
             except Exception:
                 pass
 
     def save_settings(self):
-        data = {
-            "font_name": self.font_name.get(),
-            "font_size": self.font_size.get(),
-            "font_color": self.font_color.get(),
-            "bg_color": self.bg_color.get(),
-            "bg_opacity": self.bg_opacity.get(),
-            "bg_padding": self.bg_padding.get(),
-            "position": self.position.get(),
-            "margin": self.margin.get(),
-            "size_mode": self.size_mode.get(),
-            "date_format": self.date_format.get(),
-            "save_mode": self.save_mode.get(),
-        }
+        config = self.get_current_config()
         with open(self.settings_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(config.to_dict(), f, ensure_ascii=False, indent=2)
 
     def on_close(self):
         if self.is_processing:
